@@ -211,6 +211,8 @@ class Database:
         """获取指定分析记录的网络请求数据"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # 设置文本工厂以正确处理编码
+                conn.text_factory = str
                 cursor = conn.cursor()
                 
                 # 获取所有请求数据
@@ -222,12 +224,22 @@ class Database:
                 
                 results = cursor.fetchall()
                 
-                # 处理时间戳为中国时区
+                # 处理时间戳为中国时区并确保编码正确
                 formatted_results = []
                 for row in results:
                     try:
+                        # 转换每个字段确保编码正确
+                        formatted_row = []
+                        for item in row:
+                            if isinstance(item, bytes):
+                                try:
+                                    item = item.decode('utf-8')
+                                except:
+                                    item = str(item)
+                            formatted_row.append(item)
+                        
                         # 转换时间戳到中国时区
-                        timestamp_str = row[3]  # timestamp 在第4列
+                        timestamp_str = formatted_row[3]  # timestamp 在第4列
                         if timestamp_str:
                             try:
                                 # 尝试解析不同格式的时间字符串
@@ -253,15 +265,11 @@ class Database:
                                     china_tz = timezone(timedelta(hours=8))
                                     dt = dt.astimezone(china_tz)
                                     # 格式化为字符串
-                                    timestamp_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                                    formatted_row[3] = dt.strftime('%Y-%m-%d %H:%M:%S')
                             except Exception as e:
                                 print(f"转换时间戳出错: {str(e)}, 原始时间戳: {timestamp_str}")
-                                # 如果转换失败，保持原样
                         
-                        # 构建新的结果行，替换时间戳
-                        new_row = list(row)
-                        new_row[3] = timestamp_str
-                        formatted_results.append(tuple(new_row))
+                        formatted_results.append(tuple(formatted_row))
                         
                     except Exception as e:
                         print(f"处理请求数据行时出错: {str(e)}")
@@ -271,6 +279,8 @@ class Database:
                 
         except Exception as e:
             print(f"获取网络请求数据时出错: {str(e)}")
+            import traceback
+            print(f"错误堆栈: {traceback.format_exc()}")
             return []
 
     def delete_record(self, filename, analysis_time):
@@ -345,3 +355,83 @@ class Database:
             print(f"文件名: {filename}")
             print(f"时间: {analysis_time}")
             raise 
+
+    def get_total_records(self, conditions=None):
+        """获取总记录数"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                query = "SELECT COUNT(*) FROM analysis_records WHERE 1=1"
+                params = []
+                
+                if conditions:
+                    if 'filename' in conditions:
+                        query += " AND filename LIKE ?"
+                        params.append(f"%{conditions['filename']}%")
+                    if 'date_from' in conditions:
+                        query += " AND analysis_time >= ?"
+                        params.append(conditions['date_from'])
+                    if 'date_to' in conditions:
+                        query += " AND analysis_time <= ?"
+                        params.append(conditions['date_to'])
+                
+                cursor.execute(query, params)
+                return cursor.fetchone()[0]
+                
+        except Exception as e:
+            print(f"获取记录总数失败: {str(e)}")
+            return 0
+
+    def get_records_page(self, offset, limit, conditions=None):
+        """获取分页数据"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 设置文本工厂以正确处理编码
+                conn.text_factory = str
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT analysis_time, filename, request_count, file_hash
+                    FROM analysis_records
+                    WHERE 1=1
+                """
+                params = []
+                
+                if conditions:
+                    if 'filename' in conditions:
+                        query += " AND filename LIKE ?"
+                        params.append(f"%{conditions['filename']}%")
+                    if 'date_from' in conditions:
+                        query += " AND analysis_time >= ?"
+                        params.append(conditions['date_from'])
+                    if 'date_to' in conditions:
+                        query += " AND analysis_time <= ?"
+                        params.append(conditions['date_to'])
+                
+                query += " ORDER BY analysis_time DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+                
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                
+                # 确保所有字符串都是 UTF-8 编码
+                formatted_results = []
+                for row in results:
+                    formatted_row = []
+                    for item in row:
+                        if isinstance(item, bytes):
+                            try:
+                                item = item.decode('utf-8')
+                            except:
+                                item = str(item)
+                        formatted_row.append(item)
+                    formatted_results.append(tuple(formatted_row))
+                
+                return formatted_results
+                
+        except Exception as e:
+            print(f"获取分页数据失败: {str(e)}")
+            import traceback
+            print(f"错误堆栈: {traceback.format_exc()}")
+            return [] 

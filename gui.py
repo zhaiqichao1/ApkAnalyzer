@@ -94,6 +94,15 @@ class ApkAnalyzerGUI:
         ttk.Button(button_frame, text="开始分析", command=self.start_analysis).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="查看数据库", command=self.show_database_view).pack(side=tk.LEFT, padx=5)
         
+        # 在控制面板添加 frida-server 操作按钮
+        frida_frame = ttk.Frame(control_frame)
+        frida_frame.grid(row=4, column=0, columnspan=4, pady=5)
+        
+        ttk.Button(frida_frame, text="推送 frida-server", 
+                   command=self.push_frida_server).pack(side=tk.LEFT, padx=5)
+        ttk.Button(frida_frame, text="验证 frida-server", 
+                   command=self.verify_frida_server).pack(side=tk.LEFT, padx=5)
+        
         # 网络请求数据表格
         request_frame = ttk.LabelFrame(left_frame, text="网络请求数据", padding="5")
         request_frame.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
@@ -300,13 +309,9 @@ class ApkAnalyzerGUI:
         success_count = 0
         failed_count = 0
         failed_files = []
-        has_network_count = 0  # 有网络请求的APK数量
         
         # 更新进度条最大值
         self.progress_var.set(0)
-        
-        # 创建结果汇总
-        summary_file = f"分析结果汇总_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
         for i, apk_path in enumerate(self.selected_apks, 1):
             try:
@@ -328,28 +333,21 @@ class ApkAnalyzerGUI:
                     # 保存结果
                     self.save_analysis_results(apk_path, results, "成功")
                     success_count += 1
-                    
-                    # 检查是否有网络请求
-                    if results.get('requests'):
-                        has_network_count += 1
-                        # 将有网络请求的APK信息写入汇总文件
-                        with open(summary_file, 'a', encoding='utf-8') as f:
-                            f.write(f"\n文件名: {os.path.basename(apk_path)}\n")
-                            f.write(f"请求数量: {len(results['requests'])}\n")
-                            f.write("网络请求:\n")
-                            for req in results['requests']:
-                                f.write(f"  域名: {req.get('domain', '')}\n")
-                                f.write(f"  IP: {req.get('ip', '')}\n")
-                                f.write(f"  国家: {req.get('country', '')}\n")
-                                f.write("  ----------------------\n")
-                    
                     self.log(f"分析完成: {os.path.basename(apk_path)}")
                 else:
                     error_msg = "分析失败：未能获取结果"
                     self.log(error_msg)
                     failed_count += 1
                     failed_files.append((os.path.basename(apk_path), error_msg))
-            
+                
+                # 每分析10个文件后重启ADB服务
+                if i % 10 == 0:
+                    self.log("\n重启ADB服务...")
+                    try:
+                        self.analyzer.connect_emulator()
+                    except:
+                        pass
+                
             except Exception as e:
                 error_msg = str(e)
                 self.log(f"分析出错: {error_msg}")
@@ -365,8 +363,7 @@ class ApkAnalyzerGUI:
             f"批量分析完成：\n\n"
             f"总计：{total} 个文件\n"
             f"成功：{success_count} 个\n"
-            f"失败：{failed_count} 个\n"
-            f"有网络请求：{has_network_count} 个\n\n"
+            f"失败：{failed_count} 个\n\n"
         )
         
         if failed_files:
@@ -375,11 +372,6 @@ class ApkAnalyzerGUI:
                 summary += f"{filename}: {error}\n"
         
         self.log("\n" + summary)
-        
-        # 将汇总信息也写入文件
-        with open(summary_file, 'a', encoding='utf-8') as f:
-            f.write("\n" + "="*50 + "\n")
-            f.write(summary)
         
         if failed_count > 0:
             messagebox.showwarning("分析结果", summary)
@@ -829,85 +821,171 @@ class ApkAnalyzerGUI:
         """显示数据库查看窗口"""
         try:
             # 创建新窗口
-            db_window = tk.Toplevel(self.root)
-            db_window.title("数据库查看")
-            db_window.geometry("800x600")
+            self.db_window = tk.Toplevel(self.root)
+            self.db_window.title("数据库查看")
+            self.db_window.geometry("1000x700")
+            
+            # 创建搜索框架
+            search_frame = ttk.LabelFrame(self.db_window, text="搜索条件", padding="5")
+            search_frame.pack(fill=tk.X, padx=5, pady=5)
+            
+            # 文件名搜索
+            ttk.Label(search_frame, text="文件名:").grid(row=0, column=0, padx=5)
+            self.filename_var = tk.StringVar()
+            ttk.Entry(search_frame, textvariable=self.filename_var, width=30).grid(row=0, column=1, padx=5)
+            
+            # 时间范围
+            ttk.Label(search_frame, text="时间范围:").grid(row=0, column=2, padx=5)
+            self.date_from_var = tk.StringVar()
+            self.date_to_var = tk.StringVar()
+            ttk.Entry(search_frame, textvariable=self.date_from_var, width=20).grid(row=0, column=3, padx=5)
+            ttk.Label(search_frame, text="至").grid(row=0, column=4)
+            ttk.Entry(search_frame, textvariable=self.date_to_var, width=20).grid(row=0, column=5, padx=5)
+            
+            # 搜索按钮
+            ttk.Button(search_frame, text="搜索", command=self.search_database).grid(row=0, column=6, padx=5)
+            ttk.Button(search_frame, text="重置", command=self.reset_search).grid(row=0, column=7, padx=5)
+            
+            # 创建表格框架
+            table_frame = ttk.Frame(self.db_window)
+            table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
             
             # 创建表格
             columns = ('时间', '文件名', '请求数', 'Hash值')
-            self.db_tree = ttk.Treeview(db_window, columns=columns, show='headings', selectmode='extended')  # 允许多选
+            self.db_tree = ttk.Treeview(table_frame, columns=columns, show='headings', selectmode='extended')
             
             # 设置列标题和宽度
             widths = {'时间': 150, '文件名': 300, '请求数': 100, 'Hash值': 250}
             for col in columns:
-                self.db_tree.heading(col, text=col)
+                self.db_tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c))
                 self.db_tree.column(col, width=widths[col])
             
             # 添加滚动条
-            scrollbar = ttk.Scrollbar(db_window, orient=tk.VERTICAL, command=self.db_tree.yview)
-            self.db_tree.configure(yscrollcommand=scrollbar.set)
+            y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.db_tree.yview)
+            x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.db_tree.xview)
+            self.db_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
             
             # 布局
-            self.db_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            self.db_tree.grid(row=0, column=0, sticky='nsew')
+            y_scroll.grid(row=0, column=1, sticky='ns')
+            x_scroll.grid(row=1, column=0, sticky='ew')
             
-            # 从数据库加载数据
-            try:
-                records = self.db.get_analysis_list()
-                for record in records:
-                    analysis_id, filename, file_hash, analysis_time, request_count = record
-                    self.db_tree.insert('', 'end', values=(
-                        analysis_time,
-                        filename,
-                        request_count,
-                        file_hash
-                    ))
-            except Exception as e:
-                messagebox.showerror("错误", f"加载数据库记录失败: {str(e)}")
+            table_frame.grid_rowconfigure(0, weight=1)
+            table_frame.grid_columnconfigure(0, weight=1)
             
-            # 添加双击事件处理
-            def on_double_click(event):
-                item = self.db_tree.selection()[0]
-                record = self.db_tree.item(item)['values']
-                self.show_request_details(record)
+            # 分页控件
+            page_frame = ttk.Frame(self.db_window)
+            page_frame.pack(fill=tk.X, padx=5, pady=5)
             
-            self.db_tree.bind('<Double-1>', on_double_click)
+            self.page_size = 100  # 每页显示数量
+            self.current_page = 1
+            self.total_pages = 1
+            
+            ttk.Button(page_frame, text="上一页", command=self.prev_page).pack(side=tk.LEFT, padx=5)
+            self.page_label = ttk.Label(page_frame, text="1/1")
+            self.page_label.pack(side=tk.LEFT, padx=5)
+            ttk.Button(page_frame, text="下一页", command=self.next_page).pack(side=tk.LEFT, padx=5)
+            
+            # 加载初始数据
+            self.load_database_page()
             
             # 添加右键菜单
-            menu = tk.Menu(db_window, tearoff=0)
-            menu.add_command(label="查看详情", 
-                            command=lambda: self.show_request_details(self.db_tree.item(self.db_tree.selection()[0])['values']) 
-                            if len(self.db_tree.selection()) == 1 else None)  # 只有单选时可用
-            menu.add_command(label="导出Excel", 
-                            command=lambda: self.export_to_excel(self.db_tree.item(self.db_tree.selection()[0])['values'])
-                            if len(self.db_tree.selection()) == 1 else None)  # 只有单选时可用
-            menu.add_separator()
-            menu.add_command(label="删除选中记录", 
-                            command=lambda: self.delete_selected_records()
-                            if self.db_tree.selection() else None)
+            self.db_menu = tk.Menu(self.db_window, tearoff=0)
+            self.db_menu.add_command(label="查看详情", command=self.show_record_details)
+            self.db_menu.add_command(label="导出Excel", command=self.export_selected_records)
+            self.db_menu.add_separator()
+            self.db_menu.add_command(label="删除选中", command=self.delete_selected_records)
             
-            def show_menu(event):
-                if self.db_tree.selection():
-                    menu.post(event.x_root, event.y_root)
-            
-            self.db_tree.bind('<Button-3>', show_menu)
-            
-            # 添加键盘快捷键
-            def on_delete(event):
-                self.delete_selected_records()
-            
-            self.db_tree.bind('<Delete>', on_delete)  # Delete 键删除
-            self.db_tree.bind('<Control-a>', lambda e: self.select_all_records())  # Ctrl+A 全选
+            self.db_tree.bind('<Button-3>', self.show_db_menu)
             
         except Exception as e:
             messagebox.showerror("错误", f"显示数据库视图失败: {str(e)}")
 
-    def show_request_details(self, record):
-        """显示请求详情窗口"""
+    def load_database_page(self):
+        """加载当前页的数据"""
         try:
+            # 清空表格
+            for item in self.db_tree.get_children():
+                self.db_tree.delete(item)
+            
+            # 构建查询条件
+            conditions = {}
+            if self.filename_var.get():
+                conditions['filename'] = self.filename_var.get()
+            if self.date_from_var.get():
+                conditions['date_from'] = self.date_from_var.get()
+            if self.date_to_var.get():
+                conditions['date_to'] = self.date_to_var.get()
+            
+            # 获取总记录数
+            total_records = self.db.get_total_records(conditions)
+            self.total_pages = (total_records + self.page_size - 1) // self.page_size
+            
+            # 更新页码显示
+            self.page_label.config(text=f"{self.current_page}/{self.total_pages}")
+            
+            # 获取当前页数据
+            offset = (self.current_page - 1) * self.page_size
+            records = self.db.get_records_page(offset, self.page_size, conditions)
+            
+            # 填充数据
+            for record in records:
+                self.db_tree.insert('', 'end', values=record)
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"加载数据失败: {str(e)}")
+
+    def search_database(self):
+        """搜索数据库"""
+        self.current_page = 1
+        self.load_database_page()
+
+    def reset_search(self):
+        """重置搜索条件"""
+        self.filename_var.set("")
+        self.date_from_var.set("")
+        self.date_to_var.set("")
+        self.search_database()
+
+    def prev_page(self):
+        """上一页"""
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_database_page()
+
+    def next_page(self):
+        """下一页"""
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.load_database_page()
+
+    def sort_treeview(self, col):
+        """排序表格"""
+        # 获取所有数据
+        data = [(self.db_tree.set(item, col), item) for item in self.db_tree.get_children('')]
+        # 排序
+        data.sort(reverse=self.db_tree.heading(col).get('reverse', False))
+        # 重新排列
+        for index, (_, item) in enumerate(data):
+            self.db_tree.move(item, '', index)
+        # 切换排序方向
+        self.db_tree.heading(col, reverse=not self.db_tree.heading(col).get('reverse', False))
+
+    def show_record_details(self):
+        """显示记录详情"""
+        try:
+            # 确保有选中的项目
+            if not self.db_tree.selection():
+                messagebox.showwarning("警告", "请先选择一条记录")
+                return
+            
+            # 获取选中记录
+            selected_item = self.db_tree.selection()[0]
+            record = self.db_tree.item(selected_item)['values']
+            
             # 创建新窗口
-            detail_window = tk.Toplevel(self.root)
-            detail_window.title(f"请求详情 - {record[1]}")
+            detail_window = tk.Toplevel(self.db_window)
+            detail_window.title(f"记录详情 - {record[1]}")
             detail_window.geometry("1000x600")
             
             # 创建表格
@@ -924,12 +1002,17 @@ class ApkAnalyzerGUI:
                 tree.column(col, width=widths[col])
             
             # 添加滚动条
-            scrollbar = ttk.Scrollbar(detail_window, orient=tk.VERTICAL, command=tree.yview)
-            tree.configure(yscrollcommand=scrollbar.set)
+            y_scroll = ttk.Scrollbar(detail_window, orient=tk.VERTICAL, command=tree.yview)
+            x_scroll = ttk.Scrollbar(detail_window, orient=tk.HORIZONTAL, command=tree.xview)
+            tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
             
             # 布局
-            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            tree.grid(row=0, column=0, sticky='nsew')
+            y_scroll.grid(row=0, column=1, sticky='ns')
+            x_scroll.grid(row=1, column=0, sticky='ew')
+            
+            detail_window.grid_rowconfigure(0, weight=1)
+            detail_window.grid_columnconfigure(0, weight=1)
             
             # 从数据库加载数据
             try:
@@ -950,28 +1033,45 @@ class ApkAnalyzerGUI:
                 messagebox.showerror("错误", f"加载请求数据失败: {str(e)}")
             
         except Exception as e:
-            messagebox.showerror("错误", f"显示请求详情失败: {str(e)}")
+            messagebox.showerror("错误", f"显示记录详情失败: {str(e)}")
 
-    def export_to_excel(self, record):
-        """导出记录到Excel"""
+    def export_selected_records(self):
+        """导出选中的记录到Excel"""
         try:
+            # 确保有选中的项目
+            if not self.db_tree.selection():
+                messagebox.showwarning("警告", "请先选择要导出的记录")
+                return
+            
             # 选择保存路径
             filename = filedialog.asksaveasfilename(
                 defaultextension=".xlsx",
                 filetypes=[("Excel文件", "*.xlsx")],
-                initialfile=f"{record[1]}_分析报告.xlsx"
+                title="导出分析报告"
             )
             if not filename:
                 return
             
             # 导出数据
-            self._export_report_to_excel(filename, {
-                'filename': record[1],
-                'time': record[0],
-                'status': '成功',
-                'request_count': record[2],
-                'hash': record[3]  # 添加哈希值
-            })
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "分析结果"
+            
+            # 写入表头
+            headers = ['时间', '文件名', '请求数', 'Hash值']
+            for col, header in enumerate(headers, 1):
+                ws.cell(row=1, column=col, value=header)
+            
+            # 写入数据
+            for row, item_id in enumerate(self.db_tree.selection(), 2):
+                values = self.db_tree.item(item_id)['values']
+                for col, value in enumerate(values, 1):
+                    ws.cell(row=row, column=col, value=value)
+            
+            # 保存文件
+            wb.save(filename)
+            messagebox.showinfo("成功", "数据已导出到Excel文件")
             
         except Exception as e:
             messagebox.showerror("错误", f"导出Excel失败: {str(e)}")
@@ -1018,6 +1118,35 @@ class ApkAnalyzerGUI:
     def select_all_records(self):
         """选择所有记录"""
         self.db_tree.selection_set(self.db_tree.get_children())
+
+    def push_frida_server(self):
+        """推送并启动 frida-server"""
+        try:
+            if self.analyzer.push_frida_server():
+                messagebox.showinfo("成功", "frida-server 已成功推送并启动")
+            else:
+                messagebox.showerror("错误", "frida-server 推送或启动失败")
+        except Exception as e:
+            messagebox.showerror("错误", f"操作失败: {str(e)}")
+
+    def verify_frida_server(self):
+        """验证 frida-server 状态"""
+        try:
+            if self.analyzer.verify_frida_server():
+                messagebox.showinfo("成功", "frida-server 运行正常")
+            else:
+                messagebox.showerror("错误", "frida-server 未正常运行")
+        except Exception as e:
+            messagebox.showerror("错误", f"验证失败: {str(e)}")
+
+    def show_db_menu(self, event):
+        """显示数据库表格的右键菜单"""
+        try:
+            # 确保有选中的项目
+            if self.db_tree.selection():
+                self.db_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.db_menu.grab_release()
 
 if __name__ == "__main__":
     app = ApkAnalyzerGUI()

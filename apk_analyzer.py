@@ -9,6 +9,7 @@ import socket
 import time
 from datetime import datetime
 import sys
+from urllib.parse import urlparse
 
 class ApkAnalyzer:
     def __init__(self):
@@ -553,6 +554,7 @@ class ApkAnalyzer:
             # 确保frida-server正在运行
             try:
                 subprocess.run([self.adb_path, 'shell', 'ps | grep frida-server'], check=True)
+
             except:
                 print("正在启动frida-server...")
                 try:
@@ -615,37 +617,26 @@ class ApkAnalyzer:
         """处理URL请求"""
         try:
             url = payload['url']
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
             
-            # 获取域名信息
-            domain = parsed.netloc
-            if ':' in domain:  # 如果域名中包含端口号
-                domain = domain.split(':')[0]
+            # 解析URL
+            parsed = urlparse(url)
+            host = parsed.hostname
+            if not host:
+                return
             
             # 解析IP
             try:
-                ip = socket.gethostbyname(domain)
+                ip = socket.gethostbyname(host)
             except:
-                ip = "Unknown"
-                
-            # 获取端口
-            try:
-                port = None
-                if ':' in parsed.netloc:
-                    port = int(parsed.netloc.split(':')[1])
-                if port is None:
-                    port = 443 if parsed.scheme == 'https' else 80
-            except:
-                port = 80  # 默认端口
-                
+                ip = host if self._is_ip(host) else "Unknown"
+            
             # 生成唯一标识
-            unique_id = f"{domain}-{ip}"
+            unique_id = f"{host}-{ip}"
             
             # 如果已经处理过该请求，则跳过
             if unique_id in self.request_set:
                 return
-                
+            
             # 添加到已处理集合
             self.request_set.add(unique_id)
             
@@ -664,15 +655,16 @@ class ApkAnalyzer:
                 timestamp = datetime.now().isoformat()
             
             request_info = {
-                'domain': domain,
+                'domain': host if not self._is_ip(host) else "",
                 'ip': ip,
-                'port': str(port),  # 转换为字符串
+                'port': str(parsed.port) if parsed.port else "80",
                 'timestamp': timestamp,
                 'country': ip_info.get('country', 'Unknown'),
                 'region': ip_info.get('region', 'Unknown'),
                 'city': ip_info.get('city', 'Unknown'),
                 'isp': ip_info.get('isp', 'Unknown'),
-                'org': ip_info.get('org', 'Unknown')
+                'org': ip_info.get('org', 'Unknown'),
+                'type': payload.get('type', 'url')  # 添加请求类型
             }
             
             # 添加到结果列表
@@ -684,10 +676,7 @@ class ApkAnalyzer:
             
             # 回调更新界面
             if self.progress_callback:
-                try:
-                    self.progress_callback(request_info)
-                except Exception as e:
-                    print(f"回调更新界面时出错: {str(e)}")
+                self.progress_callback(request_info)
             
         except Exception as e:
             print(f"处理URL请求时出错: {str(e)}")
@@ -765,6 +754,169 @@ class ApkAnalyzer:
 
     def set_progress_callback(self, callback):
         self.progress_callback = callback
+
+    def push_frida_server(self):
+        """手动推送并启动 frida-server"""
+        try:
+            print("\n开始推送 frida-server...")
+            
+            # 检查 frida-server 文件
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            server_path = os.path.join(base_path, 'frida-server')
+            if not os.path.exists(server_path):
+                raise Exception("frida-server 文件不存在")
+            
+            # 先停止现有的 frida-server
+            print("停止现有 frida-server...")
+            try:
+                subprocess.run([self.adb_path, 'shell', 'su -c "pkill -f frida-server"'], 
+                             capture_output=True, timeout=5)
+                time.sleep(2)
+            except:
+                pass
+            
+            # 删除设备上的旧文件
+            print("删除旧文件...")
+            try:
+                subprocess.run([self.adb_path, 'shell', 'su -c "rm -f /data/local/tmp/frida-server"'],
+                             capture_output=True, timeout=5)
+                time.sleep(1)
+            except:
+                pass
+            
+            # 推送新文件
+            print("推送新文件...")
+            try:
+                process = subprocess.Popen(
+                    [self.adb_path, 'push', server_path, '/data/local/tmp/'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+                
+                stdout, stderr = process.communicate(timeout=30)
+                if process.returncode != 0 or "error" in (stdout + stderr).lower():
+                    raise Exception(f"推送失败: {stdout}\n{stderr}")
+                    
+            except Exception as e:
+                raise Exception(f"推送文件失败: {str(e)}")
+            
+            # 验证文件是否存在
+            print("验证文件...")
+            try:
+                check_result = subprocess.run([self.adb_path, 'shell', 'su -c "ls -l /data/local/tmp/frida-server"'],
+                                        capture_output=True, text=True, timeout=5)
+                if "No such file" in check_result.stdout or "No such file" in check_result.stderr:
+                    raise Exception("文件未成功推送到设备")
+            except Exception as e:
+                raise Exception(f"文件验证失败: {str(e)}")
+            
+            # 设置权限
+            print("设置权限...")
+            try:
+                # 设置执行权限
+                subprocess.run([self.adb_path, 'shell', 'su -c "chmod 755 /data/local/tmp/frida-server"'],
+                             capture_output=True, timeout=5, check=True)
+                # 设置所有者
+                subprocess.run([self.adb_path, 'shell', 'su -c "chown root:root /data/local/tmp/frida-server"'],
+                             capture_output=True, timeout=5, check=True)
+            except Exception as e:
+                raise Exception(f"设置权限失败: {str(e)}")
+            
+            # 启动 frida-server
+            print("\n启动 frida-server...")
+            try:
+                # 先尝试使用 setsid 启动
+                start_cmd = 'su -c "cd /data/local/tmp && setsid ./frida-server &"'
+                try:
+                    subprocess.run([self.adb_path, 'shell', start_cmd],
+                                 capture_output=True, timeout=10)  # 增加超时时间到10秒
+                except subprocess.TimeoutExpired:
+                    # 超时不一定意味着失败，继续检查进程
+                    pass
+                
+                # 等待2秒让进程启动
+                time.sleep(2)
+                
+                # 检查是否成功启动
+                check_cmd = 'su -c "ps -ef | grep frida-server"'
+                check_result = subprocess.run([self.adb_path, 'shell', check_cmd],
+                                           capture_output=True, text=True, timeout=5)
+                
+                if 'frida-server' not in check_result.stdout:
+                    print("第一次启动尝试失败，使用备选方法...")
+                    
+                    # 尝试使用 nohup 启动
+                    start_cmd = 'su -c "cd /data/local/tmp && nohup ./frida-server > /dev/null 2>&1 &"'
+                    try:
+                        subprocess.run([self.adb_path, 'shell', start_cmd],
+                                     capture_output=True, timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    
+                    time.sleep(2)
+                    
+                    # 再次检查
+                    check_result = subprocess.run([self.adb_path, 'shell', check_cmd],
+                                               capture_output=True, text=True, timeout=5)
+                    
+                    if 'frida-server' not in check_result.stdout:
+                        print("第二次启动尝试失败，使用最后方法...")
+                        
+                        # 最后尝试
+                        start_cmd = 'su -c "cd /data/local/tmp && ./frida-server &"'
+                        try:
+                            subprocess.run([self.adb_path, 'shell', start_cmd],
+                                         capture_output=True, timeout=10)
+                        except subprocess.TimeoutExpired:
+                            pass
+                
+            except Exception as e:
+                print(f"启动命令执行出错: {str(e)}")
+                # 继续执行，让后续的验证来确定是否真的失败
+            
+            # 等待启动
+            print("等待服务启动...")
+            max_retries = 15
+            for i in range(max_retries):
+                if self.verify_frida_server():
+                    print("frida-server 启动成功")
+                    return True
+                print(f"等待服务启动... ({i+1}/{max_retries})")
+                time.sleep(2)
+            
+            raise Exception("frida-server 启动超时")
+            
+        except Exception as e:
+            print(f"推送 frida-server 时出错: {str(e)}")
+            return False
+
+    def verify_frida_server(self):
+        """验证 frida-server 是否正常运行"""
+        try:
+            print("\n验证 frida-server 状态...")
+            
+            # 检查进程
+            print("检查进程...")
+            try:
+                ps_result = subprocess.run([self.adb_path, 'shell', 'ps | grep frida-server'],
+                                        capture_output=True, text=True, timeout=5)
+                if 'frida-server' not in ps_result.stdout:
+                    print("frida-server 进程未运行")
+                    return False
+                print("frida-server 进程正在运行")
+                return True
+                
+            except subprocess.CalledProcessError:
+                print("frida-server 进程未运行")
+                return False
+            except Exception as e:
+                print(f"检查进程失败: {str(e)}")
+                return False
+                
+        except Exception as e:
+            print(f"验证 frida-server 时出错: {str(e)}")
+            return False
 
 def main():
     try:
