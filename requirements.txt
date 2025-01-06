@@ -1,0 +1,7 @@
+pyinstaller
+openpyxl
+pillow
+requests
+frida
+frida-tools
+colorama 

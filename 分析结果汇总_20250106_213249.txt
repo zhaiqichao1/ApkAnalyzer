@@ -1,0 +1,16 @@
+
+文件名: 9BYL.apk
+请求数量: 3
+网络请求:
+  域名: d3j9776byjdht9.cloudfront.net
+  IP: 18.65.214.209
+  国家: Japan
+  ----------------------
+  域名: d3j9776byjdht9.cloudfront.net
+  IP: 18.65.214.73
+  国家: Japan
+  ----------------------
+  域名: app-measurement.com
+  IP: 114.250.70.33
+  国家: China
+  ----------------------

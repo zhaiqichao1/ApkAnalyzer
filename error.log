@@ -1,0 +1,14 @@
+
+=== 2025-01-05 00:52:47 ===
+Traceback (most recent call last):
+  File "E:\zqc\ip-master\ip\gui.py", line 1283, in <module>
+  File "E:\zqc\ip-master\ip\gui.py", line 576, in run
+    for item in tree.get_children():
+    ^^^^^^^^^^^^^^^^^^^^
+  File "E:\zqc\python\Lib\tkinter\__init__.py", line 1599, in mainloop
+    self.tk.mainloop(n)
+    ~~~~~~~~~~~~~~~~^^^
+  File "E:\zqc\python\Lib\tkinter\__init__.py", line 2063, in __call__
+    def __call__(self, *args):
+    
+KeyboardInterrupt
