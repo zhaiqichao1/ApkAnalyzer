@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 import sys
 from urllib.parse import urlparse
+import dns.resolver
 
 class ApkAnalyzer:
     def __init__(self):
@@ -614,24 +615,52 @@ class ApkAnalyzer:
             return None
 
     def _process_url_request(self, payload):
-        """处理URL请求"""
         try:
-            url = payload['url']
+            url = payload.get('url', '')
+            host = payload.get('host', '')
             
-            # 解析URL
-            parsed = urlparse(url)
-            host = parsed.hostname
+            # 如果没有host，尝试从URL解析
+            if not host and url:
+                try:
+                    parsed = urlparse(url)
+                    host = parsed.hostname or ''
+                except:
+                    pass
+            
+            # 如果还是没有host，可能是IP直接访问
+            if not host and url:
+                # 尝试从URL中提取IP地址
+                ip_pattern = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+                ip_match = ip_pattern.search(url)
+                if ip_match:
+                    host = ip_match.group(1)
+            
             if not host:
-                return
+                print(f"警告: 无法获取host信息 - payload: {payload}")
+                host = "Unknown"
             
             # 解析IP
-            try:
-                ip = socket.gethostbyname(host)
-            except:
-                ip = host if self._is_ip(host) else "Unknown"
+            ip = None
+            if self._is_ip(host):
+                ip = host
+            else:
+                try:
+                    ip = socket.gethostbyname(host)
+                except:
+                    # 如果DNS解析失败，尝试其他方法获取IP
+                    try:
+                        # 尝试异步DNS解析
+                        resolver = dns.resolver.Resolver()
+                        resolver.timeout = 3
+                        resolver.lifetime = 3
+                        answers = resolver.resolve(host, 'A')
+                        if answers:
+                            ip = answers[0].address
+                    except:
+                        ip = "Unknown"
             
             # 生成唯一标识
-            unique_id = f"{host}-{ip}"
+            unique_id = f"{host}-{ip}-{payload.get('type', '')}"
             
             # 如果已经处理过该请求，则跳过
             if unique_id in self.request_set:
@@ -641,37 +670,29 @@ class ApkAnalyzer:
             self.request_set.add(unique_id)
             
             # 获取IP信息
-            ip_info = self._get_ip_info(ip)
-            
-            # 确保时间戳格式正确
-            try:
-                timestamp = payload.get('timestamp', '')
-                if isinstance(timestamp, str) and 'Z' in timestamp:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                    timestamp = dt.isoformat()
-            except:
-                from datetime import datetime
-                timestamp = datetime.now().isoformat()
+            ip_info = self._get_ip_info(ip) if ip and ip != "Unknown" else {
+                'country': 'Unknown',
+                'region': 'Unknown',
+                'city': 'Unknown',
+                'isp': 'Unknown',
+                'org': 'Unknown'
+            }
             
             request_info = {
                 'domain': host if not self._is_ip(host) else "",
-                'ip': ip,
-                'port': str(parsed.port) if parsed.port else "80",
-                'timestamp': timestamp,
+                'ip': ip or "Unknown",
+                'port': str(payload.get('port', '80')),
+                'timestamp': payload.get('timestamp', datetime.now().isoformat()),
                 'country': ip_info.get('country', 'Unknown'),
                 'region': ip_info.get('region', 'Unknown'),
                 'city': ip_info.get('city', 'Unknown'),
                 'isp': ip_info.get('isp', 'Unknown'),
-                'org': ip_info.get('org', 'Unknown'),
-                'type': payload.get('type', 'url')  # 添加请求类型
+                'org': ip_info.get('org', 'Unknown')
             }
             
             # 添加到结果列表
             if not hasattr(self, 'results') or self.results is None:
                 self.results = {'requests': []}
-            if 'requests' not in self.results:
-                self.results['requests'] = []
             self.results['requests'].append(request_info)
             
             # 回调更新界面
@@ -680,7 +701,6 @@ class ApkAnalyzer:
             
         except Exception as e:
             print(f"处理URL请求时出错: {str(e)}")
-            print(f"URL: {url if 'url' in locals() else 'unknown'}")
             print(f"Payload: {payload}")
 
     def _process_socket_request(self, payload):

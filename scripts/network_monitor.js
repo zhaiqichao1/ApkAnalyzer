@@ -103,4 +103,71 @@ Java.perform(function() {
     } catch(e) {
         console.log("WebView hook error: " + e);
     }
+
+    // 添加 HttpURLConnection 监控
+    var HttpURLConnection = Java.use("java.net.HttpURLConnection");
+    HttpURLConnection.connect.implementation = function() {
+        try {
+            var url = this.getURL().toString();
+            var host = this.getURL().getHost();
+            send({
+                type: 'http',
+                url: url,
+                host: host,
+                timestamp: new Date().toISOString()
+            });
+        } catch(e) {}
+        return this.connect();
+    };
+
+    // 添加 OkHttp 监控
+    try {
+        var OkHttpClient = Java.use('okhttp3.OkHttpClient');
+        OkHttpClient.newCall.implementation = function(request) {
+            try {
+                var url = request.url().toString();
+                var host = request.url().host();
+                send({
+                    type: 'okhttp',
+                    url: url,
+                    host: host,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.newCall(request);
+        };
+    } catch(e) {}
+
+    // 添加 Apache HttpClient 监控
+    try {
+        var DefaultHttpClient = Java.use('org.apache.http.impl.client.DefaultHttpClient');
+        DefaultHttpClient.execute.overload('org.apache.http.HttpHost', 'org.apache.http.HttpRequest').implementation = function(host, request) {
+            try {
+                send({
+                    type: 'apache',
+                    host: host ? host.getHostName() : '',
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.execute(host, request);
+        };
+    } catch(e) {}
+
+    // 添加 SSLSocket 监控
+    try {
+        var SSLSocket = Java.use('javax.net.ssl.SSLSocket');
+        SSLSocket.startHandshake.implementation = function() {
+            try {
+                var host = this.getInetAddress().getHostName();
+                var port = this.getPort();
+                send({
+                    type: 'ssl',
+                    host: host,
+                    port: port,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.startHandshake();
+        };
+    } catch(e) {}
 }); 
