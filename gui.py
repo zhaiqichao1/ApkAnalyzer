@@ -465,23 +465,47 @@ class ApkAnalyzerGUI:
     def save_analysis_results(self, apk_path, results, status):
         """保存分析结果"""
         try:
-            # 只保存到数据库
+            # 保存到数据库
             if results:
                 try:
                     self.db.save_results(results)
-                    print("分析结果已保存到数据库")
                 except Exception as e:
                     print(f"保存到数据库时出错: {str(e)}")
                     raise
             
-            self.log("分析结果已保存")
-            
+            # 如果有网络请求数据，自动保存Excel
+            if results.get('requests'):
+                try:
+                    # 获取APK所在目录
+                    apk_dir = os.path.dirname(apk_path)
+                    apk_name = os.path.splitext(os.path.basename(apk_path))[0]
+                    
+                    # 构建Excel文件名
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    excel_name = f"{apk_name}_网络请求_{timestamp}.xlsx"
+                    excel_path = os.path.join(apk_dir, excel_name)
+                    
+                    # 使用OutputHandler保存Excel
+                    from output_handler import OutputHandler
+                    output_handler = OutputHandler(apk_dir)
+                    output_handler.save_results(results)
+                    
+                    self.log(f"分析结果已保存到: {excel_path}")
+                    
+                except Exception as e:
+                    self.log(f"保存Excel文件时出错: {str(e)}")
+                    raise
+    
         except Exception as e:
             self.log(f"保存分析结果时出错: {str(e)}")
             raise
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        except Exception as e:
+            # 直接显示错误消息
+            messagebox.showerror("错误", f"程序运行出错: {str(e)}")
 
     def show_menu(self, event):
         """显示右键菜单"""
@@ -961,15 +985,36 @@ class ApkAnalyzerGUI:
 
     def sort_treeview(self, col):
         """排序表格"""
-        # 获取所有数据
-        data = [(self.db_tree.set(item, col), item) for item in self.db_tree.get_children('')]
-        # 排序
-        data.sort(reverse=self.db_tree.heading(col).get('reverse', False))
-        # 重新排列
-        for index, (_, item) in enumerate(data):
-            self.db_tree.move(item, '', index)
-        # 切换排序方向
-        self.db_tree.heading(col, reverse=not self.db_tree.heading(col).get('reverse', False))
+        try:
+            # 获取所有数据
+            data = [(self.db_tree.set(item, col), item) for item in self.db_tree.get_children('')]
+            
+            # 获取当前排序方向
+            if not hasattr(self, '_sort_reverse'):
+                self._sort_reverse = {}
+            
+            # 切换排序方向
+            self._sort_reverse[col] = not self._sort_reverse.get(col, False)
+            
+            # 排序
+            data.sort(reverse=self._sort_reverse[col])
+            
+            # 重新排列项目
+            for index, (_, item) in enumerate(data):
+                self.db_tree.move(item, '', index)
+                
+            # 更新表头显示排序方向
+            for header in self.db_tree['columns']:
+                if header == col:
+                    # 显示排序方向指示器
+                    direction = '↓' if self._sort_reverse[col] else '↑'
+                    self.db_tree.heading(header, text=f"{header} {direction}")
+                else:
+                    # 移除其他列的排序指示器
+                    self.db_tree.heading(header, text=header.rstrip(' ↑↓'))
+                
+        except Exception as e:
+            print(f"排序时出错: {str(e)}")
 
     def show_record_details(self):
         """显示记录详情"""

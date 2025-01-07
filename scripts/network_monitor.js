@@ -361,4 +361,139 @@ Java.perform(function() {
             return this.connectToServer(endpoint, path);
         };
     } catch(e) {}
+
+    // 监控网络连接
+    try {
+        // 监控 NetworkInfo
+        var ConnectivityManager = Java.use('android.net.ConnectivityManager');
+        ConnectivityManager.getActiveNetworkInfo.implementation = function() {
+            var networkInfo = this.getActiveNetworkInfo();
+            if (networkInfo != null) {
+                try {
+                    send({
+                        type: 'network',
+                        subtype: 'connection',
+                        info: networkInfo.toString(),
+                        timestamp: new Date().toISOString()
+                    });
+                } catch(e) {}
+            }
+            return networkInfo;
+        };
+
+        // 监控 Socket 创建
+        var SocketImpl = Java.use('java.net.SocketImpl');
+        SocketImpl.create.overload('boolean').implementation = function(stream) {
+            try {
+                var stack = Thread.currentThread().getStackTrace();
+                send({
+                    type: 'network',
+                    subtype: 'socket_create',
+                    stack: stack.toString(),
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.create(stream);
+        };
+
+        // 监控 Socket 连接
+        SocketImpl.connect.overload('java.net.InetAddress', 'int').implementation = function(address, port) {
+            try {
+                send({
+                    type: 'network',
+                    subtype: 'socket_connect',
+                    host: address.getHostAddress(),
+                    port: port,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.connect(address, port);
+        };
+
+        // 监控 DatagramSocket
+        var DatagramSocket = Java.use('java.net.DatagramSocket');
+        DatagramSocket.$init.overload('int').implementation = function(port) {
+            try {
+                send({
+                    type: 'network',
+                    subtype: 'datagram',
+                    port: port,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.$init(port);
+        };
+
+        // 监控 ServerSocket
+        var ServerSocket = Java.use('java.net.ServerSocket');
+        ServerSocket.$init.overload('int').implementation = function(port) {
+            try {
+                send({
+                    type: 'network',
+                    subtype: 'server_socket',
+                    port: port,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.$init(port);
+        };
+
+        // 监控 InetSocketAddress
+        var InetSocketAddress = Java.use('java.net.InetSocketAddress');
+        InetSocketAddress.$init.overload('java.lang.String', 'int').implementation = function(host, port) {
+            try {
+                send({
+                    type: 'network',
+                    subtype: 'socket_address',
+                    host: host,
+                    port: port,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.$init(host, port);
+        };
+
+        // 监控 NetworkOnMainThreadException
+        var NetworkOnMainThreadException = Java.use('android.os.NetworkOnMainThreadException');
+        NetworkOnMainThreadException.$init.implementation = function() {
+            try {
+                var stack = Thread.currentThread().getStackTrace();
+                send({
+                    type: 'network',
+                    subtype: 'main_thread_network',
+                    stack: stack.toString(),
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.$init();
+        };
+
+    } catch(e) {
+        console.log("Network monitoring error: " + e);
+    }
+
+    // 监控 Native 层网络调用
+    try {
+        Interceptor.attach(Module.findExportByName(null, "connect"), {
+            onEnter: function(args) {
+                try {
+                    var sockAddr = args[1];
+                    var port = Memory.readU16BE(sockAddr.add(2));
+                    var ip = Memory.readU8(sockAddr.add(4)) + "." +
+                            Memory.readU8(sockAddr.add(5)) + "." +
+                            Memory.readU8(sockAddr.add(6)) + "." +
+                            Memory.readU8(sockAddr.add(7));
+                    send({
+                        type: 'network',
+                        subtype: 'native_connect',
+                        ip: ip,
+                        port: port,
+                        timestamp: new Date().toISOString()
+                    });
+                } catch(e) {}
+            }
+        });
+    } catch(e) {
+        console.log("Native network monitoring error: " + e);
+    }
 }); 

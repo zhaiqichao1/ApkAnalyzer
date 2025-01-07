@@ -13,29 +13,54 @@ class OutputHandler:
     def save_results(self, results):
         """保存分析结果"""
         try:
-            # 获取APK文件名（不含扩展名）
+            # 获取APK基本信息
             base_name = os.path.splitext(os.path.basename(results['file_name']))[0]
-            
-            # 获取当前时间
             timestamp = datetime.now()
-            date_str = timestamp.strftime('%Y%m%d')
-            time_str = timestamp.strftime('%H%M%S')
             
-            # 获取分析信息
-            request_count = len(results.get('requests', []))
-            domain_count = len(set(req.get('domain', '') for req in results.get('requests', []) if req.get('domain')))
-            ip_count = len(set(req.get('ip', '') for req in results.get('requests', []) if req.get('ip') and req.get('ip') != 'Unknown'))
+            # 统计网络请求信息
+            requests = results.get('requests', [])
+            stats = {
+                'total': len(requests),
+                'domains': len(set(req.get('domain', '') for req in requests if req.get('domain'))),
+                'ips': len(set(req.get('ip', '') for req in requests if req.get('ip') and req.get('ip') != 'Unknown')),
+                'types': {}
+            }
+            
+            # 统计不同类型的请求数量
+            for req in requests:
+                req_type = req.get('type', 'Unknown')
+                stats['types'][req_type] = stats['types'].get(req_type, 0) + 1
+            
+            # 构建类型统计字符串
+            type_stats = []
+            for req_type, count in stats['types'].items():
+                type_stats.append(f"{req_type[:3]}{count}")
             
             # 构建文件名
-            # 格式: APK名称_日期_时间_域名数_IP数_总请求数
-            file_prefix = f"{base_name}_{date_str}_{time_str}_域名{domain_count}_IP{ip_count}_请求{request_count}"
+            # 格式: APK名称_日期_时间_[类型统计]_D域名数_I地址数_R总数
+            file_prefix = (
+                f"{base_name}_"
+                f"{timestamp.strftime('%Y%m%d_%H%M%S')}_"
+                f"[{'-'.join(type_stats)}]_"
+                f"D{stats['domains']}_"
+                f"I{stats['ips']}_"
+                f"R{stats['total']}"
+            )
             
             # 如果文件名太长，使用简短版本
-            if len(file_prefix) > 100:
-                # 如果APK名称太长，截取前30个字符
+            if len(file_prefix) > 150:
+                # 截断APK名称
                 if len(base_name) > 30:
                     base_name = base_name[:27] + "..."
-                file_prefix = f"{base_name}_{date_str}_{time_str}_D{domain_count}_I{ip_count}_R{request_count}"
+                
+                # 使用简短格式
+                file_prefix = (
+                    f"{base_name}_"
+                    f"{timestamp.strftime('%Y%m%d_%H%M%S')}_"
+                    f"D{stats['domains']}_"
+                    f"I{stats['ips']}_"
+                    f"R{stats['total']}"
+                )
             
             # 保存JSON结果
             json_path = os.path.join(self.output_dir, f"{file_prefix}.json")
@@ -46,23 +71,28 @@ class OutputHandler:
             excel_path = os.path.join(self.output_dir, f"{file_prefix}.xlsx")
             self._save_excel(results, excel_path)
             
-            # 打印保存结果
-            print("\n分析结果已保存:")
-            print(f"文件名: {os.path.basename(excel_path)}")
-            print(f"保存位置: {self.output_dir}")
-            print("\n分析统计:")
-            print(f"域名数量: {domain_count}")
-            print(f"IP数量: {ip_count}")
-            print(f"总请求数: {request_count}\n")
+            # 打印分析报告
+            print("\n=== 分析报告 ===")
+            print(f"APK文件: {base_name}")
+            print(f"分析时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            print("\n网络请求统计:")
+            print(f"总请求数: {stats['total']}")
+            print(f"域名数量: {stats['domains']}")
+            print(f"IP地址数: {stats['ips']}")
+            print("\n请求类型分布:")
+            for req_type, count in stats['types'].items():
+                print(f"- {req_type}: {count}")
+            print("\n保存位置:")
+            print(f"Excel文件: {os.path.basename(excel_path)}")
+            print(f"JSON文件: {os.path.basename(json_path)}")
+            print(f"目录: {self.output_dir}")
+            print("=" * 20 + "\n")
             
             return {
                 'json_path': json_path,
                 'excel_path': excel_path,
-                'stats': {
-                    'domain_count': domain_count,
-                    'ip_count': ip_count,
-                    'request_count': request_count
-                }
+                'stats': stats,
+                'timestamp': timestamp.isoformat()
             }
             
         except Exception as e:
@@ -131,11 +161,18 @@ class OutputHandler:
                 cell.font = openpyxl.styles.Font(bold=True)
                 cell.fill = openpyxl.styles.PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
             
+            # 获取统计信息
+            requests = results.get('requests', [])
+            domains = len(set(req.get('domain', '') for req in requests if req.get('domain')))
+            ips = len(set(req.get('ip', '') for req in requests if req.get('ip') and req.get('ip') != 'Unknown'))
+            
             info_data = [
                 ['APK文件名', results.get('file_name', '')],
                 ['文件Hash', results.get('hash', '')],
                 ['分析时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-                ['网络请求数', len(results.get('requests', []))]
+                ['总请求数', len(requests)],
+                ['域名数量', domains],
+                ['IP地址数', ips]
             ]
             
             for row, (item, value) in enumerate(info_data, 2):
@@ -149,23 +186,35 @@ class OutputHandler:
             # 创建网络请求sheet
             ws_requests = wb.create_sheet("网络请求详情")
             
-            # 写入表头
-            headers = [
-                '时间', '域名', 'IP地址', '端口', '请求类型',
-                '国家', '地区', '城市', 'ISP', '组织',
-                'URL', '请求方法', '协议'
+            # 定义表头和列宽
+            columns = [
+                ('时间', 20), 
+                ('请求类型', 15),
+                ('子类型', 15),
+                ('域名', 30),
+                ('IP地址', 15),
+                ('端口', 10),
+                ('URL', 50),
+                ('请求方法', 10),
+                ('协议', 10),
+                ('国家', 15),
+                ('地区', 15),
+                ('城市', 15),
+                ('ISP', 20),
+                ('组织', 20)
             ]
             
-            # 设置表头样式
-            for col, header in enumerate(headers, 1):
+            # 写入表头
+            for col, (header, width) in enumerate(columns, 1):
                 cell = ws_requests.cell(row=1, column=col)
                 cell.value = header
                 cell.font = openpyxl.styles.Font(bold=True, color="FFFFFF")
                 cell.fill = openpyxl.styles.PatternFill(start_color="366092", end_color="366092", fill_type="solid")
                 cell.alignment = openpyxl.styles.Alignment(horizontal="center")
+                ws_requests.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
             
             # 写入请求数据
-            for row, request in enumerate(results.get('requests', []), 2):
+            for row, request in enumerate(requests, 2):
                 try:
                     # 处理时间戳
                     timestamp = self._format_timestamp(request.get('timestamp', ''))
@@ -173,7 +222,6 @@ class OutputHandler:
                     # 解析URL信息
                     url = request.get('url', '')
                     protocol = ''
-                    method = request.get('method', '')
                     if url:
                         try:
                             parsed = urlparse(url)
@@ -181,52 +229,49 @@ class OutputHandler:
                         except:
                             pass
                     
-                    # 写入数据
-                    data = [
+                    # 准备行数据
+                    row_data = [
                         timestamp,
+                        request.get('type', ''),
+                        request.get('subtype', ''),
                         request.get('domain', ''),
                         request.get('ip', ''),
                         request.get('port', ''),
-                        request.get('type', ''),
+                        url,
+                        request.get('method', ''),
+                        protocol or request.get('scheme', ''),
                         request.get('country', ''),
                         request.get('region', ''),
                         request.get('city', ''),
                         request.get('isp', ''),
-                        request.get('org', ''),
-                        url,
-                        method,
-                        protocol
+                        request.get('org', '')
                     ]
                     
-                    for col, value in enumerate(data, 1):
+                    # 写入数据并设置样式
+                    for col, value in enumerate(row_data, 1):
                         cell = ws_requests.cell(row=row, column=col)
-                        cell.value = str(value)
-                        cell.alignment = openpyxl.styles.Alignment(horizontal="center")
-                    
+                        cell.value = str(value) if value is not None else ''
+                        cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        
+                        # 为不同类型的请求设置不同的背景色
+                        if col == 2:  # 请求类型列
+                            if value == 'WebSocket':
+                                cell.fill = openpyxl.styles.PatternFill(start_color="E6B8B7", end_color="E6B8B7", fill_type="solid")
+                            elif value == 'Network':
+                                cell.fill = openpyxl.styles.PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
+                            elif value == 'WebView':
+                                cell.fill = openpyxl.styles.PatternFill(start_color="C4D79B", end_color="C4D79B", fill_type="solid")
+                
                 except Exception as e:
                     print(f"处理第 {row-1} 行数据时出错: {str(e)}")
+                    print(f"请求数据: {request}")
                     continue
-            
-            # 设置自动列宽
-            for column in ws_requests.columns:
-                max_length = 0
-                column_letter = openpyxl.utils.get_column_letter(column[0].column)
-                
-                for cell in column:
-                    try:
-                        if cell.value:
-                            max_length = max(max_length, len(str(cell.value)))
-                    except:
-                        pass
-                
-                adjusted_width = min(max_length + 2, 50)  # 最大宽度限制为50
-                ws_requests.column_dimensions[column_letter].width = adjusted_width
             
             # 添加筛选器
             ws_requests.auto_filter.ref = ws_requests.dimensions
             
-            # 冻结首行
-            ws_requests.freeze_panes = 'A2'
+            # 冻结首行和首列
+            ws_requests.freeze_panes = 'B2'
             
             # 保存文件
             wb.save(excel_path)

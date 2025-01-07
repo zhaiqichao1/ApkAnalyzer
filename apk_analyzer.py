@@ -551,6 +551,13 @@ class ApkAnalyzer:
             else:
                 print(f"分析完成，共发现 {len(self.results['requests'])} 个网络请求")
             
+            # 添加APK文件信息到结果中
+            self.results['file_name'] = apk_path
+            self.results['hash'] = self._calculate_hash(apk_path)
+            
+            # 添加分析时间
+            self.results['analysis_time'] = datetime.now().isoformat()
+            
             return self.results
             
         except Exception as e:
@@ -674,8 +681,10 @@ class ApkAnalyzer:
                         self._process_url_request(payload)
                     elif payload['type'] == 'socket':
                         self._process_socket_request(payload)
-                    elif payload['type'] == 'websocket':  # 添加 WebSocket 处理
+                    elif payload['type'] == 'websocket':
                         self._process_websocket_request(payload)
+                    elif payload['type'] == 'network':  # 添加网络连接处理
+                        self._process_network_request(payload)
                 elif message['type'] == 'error':
                     print(f"Frida脚本错误: {message['description']}")
                 
@@ -795,6 +804,17 @@ class ApkAnalyzer:
             # 回调更新界面
             if self.progress_callback:
                 self.progress_callback(request_info)
+            
+            # 每收集到新的请求就自动保存
+            try:
+                if hasattr(self, 'last_save_time'):
+                    # 每30秒自动保存一次
+                    if (datetime.now() - self.last_save_time).total_seconds() > 30:
+                        self._auto_save_results()
+                else:
+                    self.last_save_time = datetime.now()
+            except:
+                pass
             
         except Exception as e:
             print(f"处理URL请求时出错: {str(e)}")
@@ -936,6 +956,78 @@ class ApkAnalyzer:
             
         except Exception as e:
             print(f"处理WebSocket请求时出错: {str(e)}")
+            print(f"Payload: {payload}")
+
+    def _process_network_request(self, payload):
+        """处理网络连接请求"""
+        try:
+            subtype = payload.get('subtype', '')
+            
+            # 处理不同类型的网络连接
+            if subtype == 'socket_connect' or subtype == 'native_connect':
+                host = payload.get('host', '') or payload.get('ip', '')
+                port = payload.get('port', '')
+            elif subtype == 'socket_address':
+                host = payload.get('host', '')
+                port = payload.get('port', '')
+            else:
+                # 其他类型的网络连接
+                return
+            
+            if not host:
+                print(f"警告: 无法获取网络连接主机信息 - payload: {payload}")
+                return
+            
+            # 解析IP
+            try:
+                ip = socket.gethostbyname(host) if not self._is_ip(host) else host
+            except:
+                ip = "Unknown"
+            
+            # 生成唯一标识
+            unique_id = f"net-{host}-{ip}-{port}-{subtype}"
+            
+            # 如果已经处理过该请求，则跳过
+            if unique_id in self.request_set:
+                return
+            
+            # 添加到已处理集合
+            self.request_set.add(unique_id)
+            
+            # 获取IP信息
+            ip_info = self._get_ip_info(ip) if ip != "Unknown" else {
+                'country': 'Unknown',
+                'region': 'Unknown',
+                'city': 'Unknown',
+                'isp': 'Unknown',
+                'org': 'Unknown'
+            }
+            
+            request_info = {
+                'type': 'Network',
+                'subtype': subtype,
+                'domain': host if not self._is_ip(host) else "",
+                'ip': ip,
+                'port': str(port),
+                'timestamp': payload.get('timestamp', datetime.now().isoformat()),
+                'country': ip_info.get('country', 'Unknown'),
+                'region': ip_info.get('region', 'Unknown'),
+                'city': ip_info.get('city', 'Unknown'),
+                'isp': ip_info.get('isp', 'Unknown'),
+                'org': ip_info.get('org', 'Unknown')
+            }
+            
+            # 添加到结果列表
+            if not hasattr(self, 'results') or self.results is None:
+                self.results = {'requests': []}
+            self.results['requests'].append(request_info)
+            
+            # 回调更新界面
+            if self.progress_callback:
+                self.progress_callback(request_info)
+            
+        except Exception as e:
+            print(f"处理网络连接请求时出错: {str(e)}")
             print(f"Payload: {payload}")
 
     def _is_ip(self, addr):
@@ -1110,6 +1202,28 @@ class ApkAnalyzer:
             print(f"验证 frida-server 时出错: {str(e)}")
             return False
 
+    def _auto_save_results(self):
+        """自动保存当前结果"""
+        try:
+            if self.results and self.results.get('requests'):
+                save_dir = os.path.join(os.path.dirname(self.results.get('file_name', '')), "网络分析结果")
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                
+                # 添加自动保存标记
+                self.results['auto_save'] = True
+                
+                # 使用 OutputHandler 保存结果
+                from output_handler import OutputHandler
+                output_handler = OutputHandler(save_dir)
+                output_handler.save_results(self.results)
+                
+                # 更新保存时间
+                self.last_save_time = datetime.now()
+                
+        except Exception as e:
+            print(f"自动保存结果时出错: {str(e)}")
+
 def main():
     try:
         # 创建分析器实例
@@ -1151,10 +1265,7 @@ def main():
                 results = analyzer.analyze_apk(apk_path)
                 
                 if results:
-                    from output_handler import OutputHandler
-                    output_handler = OutputHandler("output")
-                    output_handler.save_results(results)
-                    print("分析完成，结果已保存到output目录")
+                    print("分析完成")
                 
             elif choice == '2':
                 folder_path = input("请输入APK文件夹路径: ").strip()
@@ -1167,12 +1278,7 @@ def main():
                         print(f"\n正在分析: {file}")
                         results = analyzer.analyze_apk(os.path.join(folder_path, file))
                         
-                        if results:
-                            from output_handler import OutputHandler
-                            output_handler = OutputHandler("output")
-                            output_handler.save_results(results)
-                            
-                print("批量分析完成，结果已保存到output目录")
+                print("批量分析完成")
                 
             elif choice == '3':
                 print("程序退出")
