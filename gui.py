@@ -9,6 +9,7 @@ from database import Database
 from output_handler import OutputHandler
 import subprocess
 import sqlite3
+import openpyxl
 
 class ApkAnalyzerGUI:
     def __init__(self):
@@ -556,222 +557,113 @@ class ApkAnalyzerGUI:
         self.root.clipboard_append(text)
         messagebox.showinfo("提示", f"已复制 {len(rows)-1} 行数据到剪贴板")
 
-    def export_report(self):
-        """导出分析报告"""
+    def export_to_excel(self):
+        """导出数据到Excel"""
         try:
-            # 获取历史记录中的所有APK
-            apk_list = []
-            for record in self.history:
-                if record['status'] == '成功':  # 只显示分析成功的APK
-                    apk_list.append(record['filename'])
-            
-            if not apk_list:
-                messagebox.showwarning("警告", "没有可导出的分析记录")
+            # 确保有选中的记录
+            if not self.db_tree.selection():
+                messagebox.showwarning("警告", "请先选择要导出的记录")
                 return
             
-            # 创建选择对话框
-            select_window = tk.Toplevel(self.root)
-            select_window.title("选择要导出的APK")
-            select_window.geometry("400x500")
-            select_window.transient(self.root)  # 设置为主窗口的子窗口
+            # 获取选中的记录
+            selected_items = self.db_tree.selection()
             
-            # 创建列表框
-            frame = ttk.Frame(select_window, padding="10")
-            frame.pack(fill=tk.BOTH, expand=True)
+            # 获取保存路径
+            file_path = filedialog.asksaveasfilename(
+                defaultextension='.xlsx',
+                filetypes=[('Excel 文件', '*.xlsx')],
+                initialfile='网络请求分析结果.xlsx'
+            )
             
-            ttk.Label(frame, text="请选择要导出报告的APK：").pack(anchor='w', pady=(0,5))
+            if not file_path:
+                return
             
-            # 创建列表框和滚动条
-            list_frame = ttk.Frame(frame)
-            list_frame.pack(fill=tk.BOTH, expand=True)
-            
-            scrollbar = ttk.Scrollbar(list_frame)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            
-            listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
-            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            
-            scrollbar.config(command=listbox.yview)
-            
-            # 添加APK列表
-            for apk in apk_list:
-                listbox.insert(tk.END, apk)
-            
-            # 按钮框架
-            button_frame = ttk.Frame(frame)
-            button_frame.pack(fill=tk.X, pady=(10,0))
-            
-            def on_export():
-                selection = listbox.curselection()
-                if not selection:
-                    messagebox.showwarning("警告", "请选择要导出的APK")
-                    return
-                
-                selected_apk = listbox.get(selection[0])
-                # 获取选中APK的分析记录
-                selected_record = None
-                for record in self.history:
-                    if record['filename'] == selected_apk:
-                        selected_record = record
-                        break
-                
-                if not selected_record:
-                    messagebox.showerror("错误", "找不到选中APK的分析记录")
-                    return
-                
-                # 选择保存路径
-                filename = filedialog.asksaveasfilename(
-                    defaultextension=".xlsx",
-                    filetypes=[("Excel文件", "*.xlsx")],
-                    title="导出分析报告",
-                    initialfile=f"{selected_apk}_分析报告.xlsx"
-                )
-                if not filename:
-                    return
-                
-                # 导出报告
-                self._export_report_to_excel(filename, selected_record)
-                select_window.destroy()
-            
-            ttk.Button(button_frame, text="导出", command=on_export).pack(side=tk.RIGHT, padx=5)
-            ttk.Button(button_frame, text="取消", 
-                      command=select_window.destroy).pack(side=tk.RIGHT, padx=5)
-            
-            # 设置模态对话框
-            select_window.grab_set()
-            select_window.wait_window()
-            
-        except Exception as e:
-            self.log(f"导出报告时出错: {str(e)}")
-            messagebox.showerror("错误", f"导出报告失败: {str(e)}")
-
-    def _export_report_to_excel(self, filename, record):
-        """导出指定APK的分析报告到Excel"""
-        try:
-            print(f"开始导出报告到: {filename}")
-            print(f"记录信息: {record}")
-            
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            
-            # 从数据库获取该APK的网络请求数据
-            # 首先找到对应的分析记录ID
-            analysis_id = None
-            try:
-                records = self.db.get_analysis_list()
-                print(f"数据库记录: {records}")
-                
-                for rec in records:
-                    # 更宽松的匹配条件
-                    db_filename = os.path.basename(rec[1])
-                    record_filename = os.path.basename(record['filename'])
-                    
-                    # 转换时间格式以便比较
-                    db_time = datetime.strptime(rec[3], '%Y-%m-%d %H:%M:%S')
-                    record_time = datetime.strptime(record['time'], '%Y-%m-%d %H:%M:%S')
-                    
-                    time_diff = abs((db_time - record_time).total_seconds())
-                    
-                    if db_filename == record_filename and time_diff < 60:  # 允许1分钟的时间差
-                        analysis_id = rec[0]
-                        print(f"找到匹配的记录ID: {analysis_id}")
-                        break
-                    
-            except Exception as e:
-                print(f"查找分析记录时出错: {str(e)}")
-                raise
-            
-            if not analysis_id:
-                print("未找到匹配的分析记录")
-                raise Exception("找不到对应的分析记录")
-            
-            # 获取该分析记录的网络请求数据
-            requests_data = self.db.get_requests_by_analysis(analysis_id)
-            print(f"获取到 {len(requests_data)} 条请求数据")
-            
-            # 创建工作簿
+            # 创建Excel工作簿
             wb = openpyxl.Workbook()
             
-            # 基本信息sheet
-            ws_info = wb.active
-            ws_info.title = "基本信息"
+            # 创建概览sheet
+            ws_overview = wb.active
+            ws_overview.title = "分析概览"
             
-            # 添加基本信息
-            info_data = [
-                ['APK文件名', record['filename']],
-                ['分析时间', record['time']],
-                ['分析状态', record['status']],
-                ['网络请求数', record['request_count']],
-                ['文件哈希', record['hash']]  # 添加哈希值
-            ]
-            
-            # 设置基本信息样式
-            for row_idx, (item, value) in enumerate(info_data, 1):
-                # 标题列
-                cell = ws_info.cell(row=row_idx, column=1)
-                cell.value = item
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
-                cell.alignment = Alignment(horizontal="left")
-                
-                # 值列
-                cell = ws_info.cell(row=row_idx, column=2)
-                cell.value = value
-                cell.alignment = Alignment(horizontal="left")
-                # 为哈希值设置等宽字体
-                if item == '文件哈希':
-                    cell.font = Font(name='Consolas')
-            
-            # 调整基本信息表格列宽
-            ws_info.column_dimensions['A'].width = 20
-            ws_info.column_dimensions['B'].width = max(40, len(record['hash']) + 2)  # 确保哈希值能完整显示
-            
-            # 网络请求sheet
-            ws_requests = wb.create_sheet("网络请求数据")
-            
-            # 设置表头
-            headers = ['域名', 'IP地址', '端口', '时间', '国家', '地区', '城市', 'ISP', '组织']
-            for col, header in enumerate(headers, 1):
-                cell = ws_requests.cell(row=1, column=col)
+            # 设置概览表头
+            overview_headers = ['APK文件名', '分析时间', '请求总数', '域名数量', 'IP数量']
+            for col, header in enumerate(overview_headers, 1):
+                cell = ws_overview.cell(row=1, column=col)
                 cell.value = header
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-                cell.alignment = Alignment(horizontal="center")
-                cell.border = Border(
-                    left=Side(style='thin'),
-                    right=Side(style='thin'),
-                    top=Side(style='thin'),
-                    bottom=Side(style='thin')
-                )
+                cell.font = openpyxl.styles.Font(bold=True)
+                cell.fill = openpyxl.styles.PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
             
-            # 添加数据
-            for row_idx, row_data in enumerate(requests_data, 2):
-                for col_idx, value in enumerate(row_data, 1):
-                    cell = ws_requests.cell(row=row_idx, column=col_idx)
-                    cell.value = str(value)  # 确保所有值都是字符串
-                    cell.alignment = Alignment(horizontal="center")
-                    cell.border = Border(
-                        left=Side(style='thin'),
-                        right=Side(style='thin'),
-                        top=Side(style='thin'),
-                        bottom=Side(style='thin')
-                    )
+            # 获取所有选中记录的详细信息
+            row = 2
+            for item in selected_items:
+                record = self.db_tree.item(item)['values']
+                analysis_id = None
+                
+                # 从数据库获取分析ID
+                records = self.db.get_analysis_list()
+                for rec in records:
+                    if rec[1] == record[1] and str(rec[3]) == record[0]:
+                        analysis_id = rec[0]
+                        break
+                
+                if analysis_id:
+                    # 获取请求数据
+                    requests = self.db.get_requests_by_analysis(analysis_id)
+                    
+                    # 统计信息
+                    domains = len(set(req[0] for req in requests if req[0]))  # 域名列
+                    ips = len(set(req[1] for req in requests if req[1]))     # IP列
+                    
+                    # 写入概览数据
+                    ws_overview.cell(row=row, column=1, value=record[1])  # APK文件名
+                    ws_overview.cell(row=row, column=2, value=record[0])  # 分析时间
+                    ws_overview.cell(row=row, column=3, value=len(requests))  # 请求总数
+                    ws_overview.cell(row=row, column=4, value=domains)  # 域名数量
+                    ws_overview.cell(row=row, column=5, value=ips)  # IP数量
+                    
+                    # 创建详细信息sheet
+                    sheet_name = f"详细信息_{row-1}"
+                    ws_details = wb.create_sheet(sheet_name)
+                    
+                    # 设置详细信息表头
+                    detail_headers = [
+                        '时间', '请求类型', '子类型', '域名', 'IP地址', '端口',
+                        'URL', '请求方法', '协议', '国家', '地区', '城市',
+                        'ISP', '组织'
+                    ]
+                    
+                    # 设置列宽
+                    column_widths = {
+                        '时间': 20, '请求类型': 15, '子类型': 15, '域名': 30,
+                        'IP地址': 15, '端口': 10, 'URL': 50, '请求方法': 10,
+                        '协议': 10, '国家': 15, '地区': 15, '城市': 15,
+                        'ISP': 20, '组织': 20
+                    }
+                    
+                    # 写入表头并设置样式
+                    for col, header in enumerate(detail_headers, 1):
+                        cell = ws_details.cell(row=1, column=col)
+                        cell.value = header
+                        cell.font = openpyxl.styles.Font(bold=True, color="FFFFFF")
+                        cell.fill = openpyxl.styles.PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                        cell.alignment = openpyxl.styles.Alignment(horizontal="center")
+                        ws_details.column_dimensions[openpyxl.utils.get_column_letter(col)].width = column_widths[header]
+                    
+                    # 写入详细数据
+                    for req_row, request in enumerate(requests, 2):
+                        for col, value in enumerate(request, 1):
+                            cell = ws_details.cell(row=req_row, column=col)
+                            cell.value = str(value) if value is not None else ''
+                            cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    
+                    row += 1
             
-            # 调整列宽
-            for column_cells in ws_requests.columns:
-                length = max(len(str(cell.value or '')) for cell in column_cells)
-                ws_requests.column_dimensions[column_cells[0].column_letter].width = length + 2
-            
-            # 保存文件
-            print(f"正在保存Excel文件: {filename}")
-            wb.save(filename)
-            print("Excel文件保存成功")
-            messagebox.showinfo("成功", "分析报告已导出")
+            # 保存Excel文件
+            wb.save(file_path)
+            messagebox.showinfo("成功", f"数据已导出到:\n{file_path}")
             
         except Exception as e:
-            print(f"导出Excel文件时出错: {str(e)}")
-            messagebox.showerror("错误", f"导出Excel失败: {str(e)}")
-            raise
+            messagebox.showerror("错误", f"导出数据失败: {str(e)}")
 
     def delete_selected_history(self):
         """删除选中的历史记录"""

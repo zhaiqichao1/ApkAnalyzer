@@ -22,6 +22,8 @@ class ApkAnalyzer:
         self.config_file = "config.json"
         self.config = {}  # 添加config属性
         self.request_set = set()  # 用于存储已处理的请求
+        self.ip_info_cache = {}  # 添加IP信息缓存
+        self.dns_cache = {}  # 添加DNS缓存
         
         # 创建输出目录
         if not os.path.exists(self.output_dir):
@@ -353,8 +355,8 @@ class ApkAnalyzer:
             except subprocess.CalledProcessError as e:
                 raise Exception(f"APK安装失败: {e.stdout}\n{e.stderr}")
             
-            # 等待安装完成
-            time.sleep(2)
+            # 减少应用启动等待时间
+            time.sleep(2)  # 从5秒减少到2秒
             
             # 获取包名
             print("\n获取包名...")
@@ -429,11 +431,11 @@ class ApkAnalyzer:
                         perm = line.strip().split(':')[0].strip()
                         permissions.append(perm)
                 
-                # 批量授予权限
+                # 减少权限处理的超时时间
                 for permission in permissions:
                     try:
                         subprocess.run([self.adb_path, 'shell', f'pm grant {package_name} {permission}'],
-                                     capture_output=True, timeout=2)
+                                     capture_output=True, timeout=1)  # 从2秒减少到1秒
                     except:
                         continue
                 
@@ -456,21 +458,10 @@ class ApkAnalyzer:
             except Exception as e:
                 print(f"授予权限时出错: {str(e)}")
             
-            # 启动应用前先关闭可能的弹窗
-            print("\n处理系统弹窗...")
+            # 优化弹窗处理时间
             try:
-                # 关闭权限弹窗
-                subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=1)  # 返回键
-                time.sleep(0.5)
-                subprocess.run([self.adb_path, 'shell', 'input keyevent 66'], timeout=1)  # 确认键
-                time.sleep(0.5)
-                
-                # 点击允许按钮位置
-                subprocess.run([self.adb_path, 'shell', 'input tap 900 1200'], timeout=1)
-                time.sleep(0.5)
-                
-                # 再次尝试关闭
-                subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=1)
+                subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=0.5)
+                subprocess.run([self.adb_path, 'shell', 'input tap 900 1200'], timeout=0.5)
             except:
                 pass
             
@@ -508,12 +499,28 @@ class ApkAnalyzer:
             if not script:
                 raise Exception("Frida脚本注入失败")
             
-            # 等待一段时间收集数据
+            # 优化数据收集时间
             print("\n正在收集网络请求数据...")
-            total_time = 30  # 总等待时间
+            total_time = 15  # 从30秒减少到15秒
+            last_count = 0
+            no_new_data_time = 0
+            
             for i in range(total_time):
-                print(f"已收集 {i+1}/{total_time} 秒，发现 {len(self.results['requests'])} 个请求", end='\r')
+                current_count = len(self.results['requests'])
+                print(f"已收集 {i+1}/{total_time} 秒，发现 {current_count} 个请求", end='\r')
+                
+                # 如果3秒内没有新请求，提前结束
+                if current_count == last_count:
+                    no_new_data_time += 1
+                    if no_new_data_time >= 3:
+                        print("\n3秒内无新请求，提前结束收集")
+                        break
+                else:
+                    no_new_data_time = 0
+                    last_count = current_count
+                
                 time.sleep(1)
+            
             print("\n")  # 换行
             
             # 停止监控
@@ -583,114 +590,134 @@ class ApkAnalyzer:
         return hash_md5.hexdigest() 
 
     def _get_ip_info(self, ip):
-        """获取IP地址信息"""
+        """获取IP地址信息（带缓存）"""
         try:
+            # 检查缓存
+            if ip in self.ip_info_cache:
+                return self.ip_info_cache[ip]
+            
             # 使用 ip-api.com 的免费API
-            response = requests.get(f'http://ip-api.com/json/{ip}', timeout=5)
+            response = requests.get(f'http://ip-api.com/json/{ip}', timeout=3)  # 减少超时时间
             if response.status_code == 200:
                 data = response.json()
                 if data['status'] == 'success':
-                    return {
+                    result = {
                         'country': data.get('country', 'Unknown'),
                         'region': data.get('regionName', 'Unknown'),
                         'city': data.get('city', 'Unknown'),
                         'isp': data.get('isp', 'Unknown'),
                         'org': data.get('org', 'Unknown')
                     }
+                    # 保存到缓存
+                    self.ip_info_cache[ip] = result
+                    return result
+                
         except Exception as e:
             print(f"获取IP信息时出错: {str(e)}")
             
         # 如果请求失败，返回默认值
-        return {
+        default_result = {
             'country': 'Unknown',
             'region': 'Unknown',
             'city': 'Unknown',
             'isp': 'Unknown',
             'org': 'Unknown'
         }
+        self.ip_info_cache[ip] = default_result
+        return default_result
 
     def _inject_frida_script(self):
-        """注入Frida脚本"""
+        """注入 Frida 监控脚本"""
         try:
-            # 等待设备连接
-            print("等待设备连接...")
-            for _ in range(3):  # 尝试3次
+            print("准备注入 Frida 脚本...")
+            
+            # 重置结果
+            self.results = {'requests': []}
+            self.request_set.clear()
+            
+            # 确保 frida-server 正在运行
+            if not self.verify_frida_server():
+                print("正在尝试启动 frida-server...")
                 try:
-                    # 先尝试获取USB设备
-                    device = frida.get_usb_device(timeout=5)
-                    break
-                except frida.TimedOutError:
-                    # 如果USB连接失败，尝试通过网络连接
-                    try:
-                        device = frida.get_device_manager().add_remote_device('127.0.0.1:27042')
-                        break
-                    except:
-                        print("尝试重新连接设备...")
-                        time.sleep(2)
-            else:
-                raise Exception("无法连接到设备")
-
-            # 确保frida-server正在运行
-            try:
-                subprocess.run([self.adb_path, 'shell', 'ps | grep frida-server'], check=True)
-
-            except:
-                print("正在启动frida-server...")
-                try:
-                    # 推送frida-server到设备
-                    server_path = os.path.join(os.path.dirname(__file__), 'frida-server')
-                    if os.path.exists(server_path):
-                        subprocess.run([self.adb_path, 'push', server_path, '/data/local/tmp/'], check=True)
-                        subprocess.run([self.adb_path, 'shell', 'chmod 755 /data/local/tmp/frida-server'], check=True)
-                        subprocess.run([self.adb_path, 'shell', '/data/local/tmp/frida-server &'], check=True)
-                        time.sleep(2)  # 等待服务器启动
-                    else:
-                        raise Exception("找不到frida-server文件")
+                    # 尝试启动 frida-server
+                    subprocess.run([self.adb_path, 'shell', '/data/local/tmp/frida-server &'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                    time.sleep(2)  # 等待服务启动
+                    
+                    # 再次验证
+                    if not self.verify_frida_server():
+                        raise Exception("无法启动 frida-server")
                 except Exception as e:
-                    raise Exception(f"启动frida-server失败: {str(e)}")
-
-            # 等待应用启动
-            print("等待应用启动...")
-            for _ in range(10):  # 最多等待10秒
-                front_app = device.get_frontmost_application()
-                if front_app:
-                    break
-                time.sleep(1)
-            else:
-                raise Exception("无法获取前台应用")
-
-            # 读取脚本内容
-            script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'network_monitor.js')
-            if not os.path.exists(script_path):
-                raise Exception("找不到监控脚本文件")
+                    raise Exception(f"启动 frida-server 失败: {str(e)}")
             
-            with open(script_path, 'r', encoding='utf-8') as f:
-                script_content = f.read()
-
-            # 附加到进程
-            session = device.attach(front_app.pid)
+            # 获取设备
+            try:
+                device = frida.get_usb_device(timeout=5)
+            except frida.TimedOutError:
+                raise Exception("获取设备超时，请检查USB连接")
+            except frida.ServerNotRunningError:
+                raise Exception("Frida服务未运行")
+            except Exception as e:
+                raise Exception(f"获取设备失败: {str(e)}")
             
-            # 创建脚本
-            script = session.create_script(script_content)
-            
-            # 处理消息回调
-            def on_message(message, data):
-                if message['type'] == 'send':
-                    payload = message['payload']
-                    if payload['type'] == 'url':
-                        self._process_url_request(payload)
-                    elif payload['type'] == 'socket':
-                        self._process_socket_request(payload)
-                    elif payload['type'] == 'websocket':
-                        self._process_websocket_request(payload)
-                    elif payload['type'] == 'network':  # 添加网络连接处理
-                        self._process_network_request(payload)
-                elif message['type'] == 'error':
-                    print(f"Frida脚本错误: {message['description']}")
+            # 获取进程
+            try:
+                processes = device.enumerate_processes()
+                target_process = None
+                for process in processes:
+                    if process.name == package_name:
+                        target_process = process
+                        break
                 
-            script.on('message', on_message)
-            script.load()
-            return script
+                if not target_process:
+                    raise Exception(f"找不到目标进程: {package_name}")
+                
+                # 附加到进程
+                session = device.attach(target_process.pid)
+                
+            except frida.ProcessNotFoundError:
+                raise Exception(f"进程未找到: {package_name}")
+            except Exception as e:
+                raise Exception(f"附加到进程失败: {str(e)}")
+            
+            # 加载脚本
+            try:
+                # 读取脚本文件
+                script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'network_monitor.js')
+                if not os.path.exists(script_path):
+                    raise Exception(f"找不到脚本文件: {script_path}")
+                
+                with open(script_path, 'r', encoding='utf-8') as f:
+                    script_content = f.read()
+                
+                # 创建脚本
+                script = session.create_script(script_content)
+                
+                # 设置消息处理
+                def on_message(message, data):
+                    if message['type'] == 'send':
+                        payload = message['payload']
+                        if payload['type'] == 'url':
+                            self._process_url_request(payload)
+                        elif payload['type'] == 'socket':
+                            self._process_socket_request(payload)
+                        elif payload['type'] == 'websocket':
+                            self._process_websocket_request(payload)
+                        elif payload['type'] == 'network':
+                            self._process_network_request(payload)
+                    elif message['type'] == 'error':
+                        print(f"Frida脚本错误: {message['description']}")
+                
+                script.on('message', on_message)
+                
+                # 加载脚本
+                script.load()
+                print("Frida脚本注入成功")
+                
+                return script
+                
+            except Exception as e:
+                raise Exception(f"加载脚本失败: {str(e)}")
             
         except Exception as e:
             print(f"注入Frida脚本时出错: {str(e)}")
@@ -721,25 +748,8 @@ class ApkAnalyzer:
                 print(f"警告: 无法获取host信息 - payload: {payload}")
                 host = "Unknown"
             
-            # 解析IP
-            ip = None
-            if self._is_ip(host):
-                ip = host
-            else:
-                try:
-                    ip = socket.gethostbyname(host)
-                except:
-                    # 如果DNS解析失败，尝试其他方法获取IP
-                    try:
-                        # 尝试异步DNS解析
-                        resolver = dns.resolver.Resolver()
-                        resolver.timeout = 3
-                        resolver.lifetime = 3
-                        answers = resolver.resolve(host, 'A')
-                        if answers:
-                            ip = answers[0].address
-                    except:
-                        ip = "Unknown"
+            # 使用优化后的DNS解析
+            ip = self._resolve_dns(host)
             
             # 生成唯一标识
             unique_id = f"{host}-{ip}-{payload.get('type', '')}"
@@ -804,17 +814,6 @@ class ApkAnalyzer:
             # 回调更新界面
             if self.progress_callback:
                 self.progress_callback(request_info)
-            
-            # 每收集到新的请求就自动保存
-            try:
-                if hasattr(self, 'last_save_time'):
-                    # 每30秒自动保存一次
-                    if (datetime.now() - self.last_save_time).total_seconds() > 30:
-                        self._auto_save_results()
-                else:
-                    self.last_save_time = datetime.now()
-            except:
-                pass
             
         except Exception as e:
             print(f"处理URL请求时出错: {str(e)}")
@@ -1183,16 +1182,35 @@ class ApkAnalyzer:
             # 检查进程
             print("检查进程...")
             try:
-                ps_result = subprocess.run([self.adb_path, 'shell', 'ps | grep frida-server'],
+                # 使用 ps -A 以确保能看到所有进程
+                ps_result = subprocess.run([self.adb_path, 'shell', 'ps -A | grep frida-server'],
                                         capture_output=True, text=True, timeout=5)
+                
+                if 'frida-server' not in ps_result.stdout:
+                    # 尝试使用 ps -ef
+                    ps_result = subprocess.run([self.adb_path, 'shell', 'ps -ef | grep frida-server'],
+                                         capture_output=True, text=True, timeout=5)
+                    
                 if 'frida-server' not in ps_result.stdout:
                     print("frida-server 进程未运行")
                     return False
+                    
                 print("frida-server 进程正在运行")
+                
+                # 检查端口
+                print("检查端口...")
+                port_result = subprocess.run([self.adb_path, 'shell', 'netstat -an | grep 27042'],
+                                          capture_output=True, text=True, timeout=5)
+                
+                if '27042' not in port_result.stdout:
+                    print("frida-server 端口未监听")
+                    return False
+                    
+                print("frida-server 端口正常")
                 return True
                 
-            except subprocess.CalledProcessError:
-                print("frida-server 进程未运行")
+            except subprocess.TimeoutExpired:
+                print("检查进程超时")
                 return False
             except Exception as e:
                 print(f"检查进程失败: {str(e)}")
@@ -1202,27 +1220,38 @@ class ApkAnalyzer:
             print(f"验证 frida-server 时出错: {str(e)}")
             return False
 
-    def _auto_save_results(self):
-        """自动保存当前结果"""
+    def _resolve_dns(self, host):
+        """DNS解析（带缓存）"""
         try:
-            if self.results and self.results.get('requests'):
-                save_dir = os.path.join(os.path.dirname(self.results.get('file_name', '')), "网络分析结果")
-                if not os.path.exists(save_dir):
-                    os.makedirs(save_dir)
-                
-                # 添加自动保存标记
-                self.results['auto_save'] = True
-                
-                # 使用 OutputHandler 保存结果
-                from output_handler import OutputHandler
-                output_handler = OutputHandler(save_dir)
-                output_handler.save_results(self.results)
-                
-                # 更新保存时间
-                self.last_save_time = datetime.now()
-                
-        except Exception as e:
-            print(f"自动保存结果时出错: {str(e)}")
+            # 检查缓存
+            if host in self.dns_cache:
+                return self.dns_cache[host]
+            
+            # 如果是IP地址，直接返回
+            if self._is_ip(host):
+                self.dns_cache[host] = host
+                return host
+            
+            # 尝试解析
+            ip = socket.gethostbyname(host)
+            self.dns_cache[host] = ip
+            return ip
+        except:
+            try:
+                # 备用DNS解析
+                resolver = dns.resolver.Resolver()
+                resolver.timeout = 2
+                resolver.lifetime = 2
+                answers = resolver.resolve(host, 'A')
+                if answers:
+                    ip = answers[0].address
+                    self.dns_cache[host] = ip
+                    return ip
+            except:
+                pass
+        
+        self.dns_cache[host] = "Unknown"
+        return "Unknown"
 
 def main():
     try:
