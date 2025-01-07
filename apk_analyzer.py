@@ -415,6 +415,65 @@ class ApkAnalyzer:
             subprocess.run([self.adb_path, 'shell', f'am force-stop {package_name}'])
             time.sleep(2)  # 等待应用完全停止
             
+            # 在启动应用前，先自动授予所有权限
+            print("\n自动授予权限...")
+            try:
+                # 获取应用的所有权限
+                result = subprocess.run([self.adb_path, 'shell', f'dumpsys package {package_name} | grep permission'],
+                                     capture_output=True, text=True)
+                
+                # 解析权限列表
+                permissions = []
+                for line in result.stdout.splitlines():
+                    if 'android.permission.' in line:
+                        perm = line.strip().split(':')[0].strip()
+                        permissions.append(perm)
+                
+                # 批量授予权限
+                for permission in permissions:
+                    try:
+                        subprocess.run([self.adb_path, 'shell', f'pm grant {package_name} {permission}'],
+                                     capture_output=True, timeout=2)
+                    except:
+                        continue
+                
+                print(f"已授予 {len(permissions)} 个权限")
+                
+                # 额外处理一些特殊权限
+                special_permissions = [
+                    'android.permission.SYSTEM_ALERT_WINDOW',
+                    'android.permission.WRITE_SETTINGS',
+                    'android.permission.PACKAGE_USAGE_STATS'
+                ]
+                
+                for perm in special_permissions:
+                    try:
+                        subprocess.run([self.adb_path, 'shell', f'appops set {package_name} {perm} allow'],
+                                     capture_output=True, timeout=2)
+                    except:
+                        continue
+                
+            except Exception as e:
+                print(f"授予权限时出错: {str(e)}")
+            
+            # 启动应用前先关闭可能的弹窗
+            print("\n处理系统弹窗...")
+            try:
+                # 关闭权限弹窗
+                subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=1)  # 返回键
+                time.sleep(0.5)
+                subprocess.run([self.adb_path, 'shell', 'input keyevent 66'], timeout=1)  # 确认键
+                time.sleep(0.5)
+                
+                # 点击允许按钮位置
+                subprocess.run([self.adb_path, 'shell', 'input tap 900 1200'], timeout=1)
+                time.sleep(0.5)
+                
+                # 再次尝试关闭
+                subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=1)
+            except:
+                pass
+            
             # 启动应用
             print("\n启动应用...")
             try:
@@ -425,9 +484,21 @@ class ApkAnalyzer:
                 if not activity:
                     raise Exception("找不到启动Activity")
                 
-                # 启动应用
-                subprocess.run([self.adb_path, 'shell', f'am start -n {activity}'], check=True)
-                time.sleep(5)  # 等待应用完全启动
+                # 使用 monkey 启动应用（可以绕过一些系统弹窗）
+                subprocess.run([self.adb_path, 'shell', f'monkey -p {package_name} -c android.intent.category.LAUNCHER 1'],
+                             capture_output=True, check=True)
+                
+                # 等待应用启动
+                time.sleep(5)
+                
+                # 再次处理可能的弹窗
+                try:
+                    subprocess.run([self.adb_path, 'shell', 'input keyevent 4'], timeout=1)
+                    time.sleep(0.5)
+                    subprocess.run([self.adb_path, 'shell', 'input tap 900 1200'], timeout=1)
+                except:
+                    pass
+                
             except subprocess.CalledProcessError as e:
                 raise Exception(f"应用启动失败: {e.stdout}\n{e.stderr}")
             
@@ -603,6 +674,8 @@ class ApkAnalyzer:
                         self._process_url_request(payload)
                     elif payload['type'] == 'socket':
                         self._process_socket_request(payload)
+                    elif payload['type'] == 'websocket':  # 添加 WebSocket 处理
+                        self._process_websocket_request(payload)
                 elif message['type'] == 'error':
                     print(f"Frida脚本错误: {message['description']}")
                 
@@ -690,6 +763,30 @@ class ApkAnalyzer:
                 'org': ip_info.get('org', 'Unknown')
             }
             
+            # 处理 WebView 请求
+            if payload.get('type') == 'webview':
+                request_info['type'] = 'WebView'
+                request_info['subtype'] = payload.get('subtype', '')
+                request_info['method'] = payload.get('method', '')
+                request_info['headers'] = payload.get('headers', '')
+                
+                # 如果是 WebView 请求，尝试从 URL 中提取更多信息
+                if url:
+                    try:
+                        parsed = urlparse(url)
+                        if not host and parsed.netloc:
+                            host = parsed.netloc
+                            # 更新域名相关信息
+                            request_info['domain'] = host if not self._is_ip(host) else ""
+                            if not ip or ip == "Unknown":
+                                try:
+                                    ip = socket.gethostbyname(host)
+                                    request_info['ip'] = ip
+                                except:
+                                    pass
+                    except:
+                        pass
+
             # 添加到结果列表
             if not hasattr(self, 'results') or self.results is None:
                 self.results = {'requests': []}
@@ -764,6 +861,81 @@ class ApkAnalyzer:
             
         except Exception as e:
             print(f"处理Socket请求时出错: {str(e)}")
+            print(f"Payload: {payload}")
+
+    def _process_websocket_request(self, payload):
+        """处理 WebSocket 请求"""
+        try:
+            url = payload.get('url', '')
+            
+            # 解析 WebSocket URL
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                host = parsed.hostname or ''
+                port = str(parsed.port or ('443' if parsed.scheme == 'wss' else '80'))
+                scheme = parsed.scheme
+            except:
+                host = ''
+                port = ''
+                scheme = ''
+            
+            if not host:
+                print(f"警告: 无法解析WebSocket URL - {url}")
+                return
+            
+            # 解析IP
+            try:
+                ip = socket.gethostbyname(host)
+            except:
+                ip = "Unknown"
+            
+            # 生成唯一标识
+            unique_id = f"ws-{host}-{ip}-{port}"
+            
+            # 如果已经处理过该请求，则跳过
+            if unique_id in self.request_set:
+                return
+            
+            # 添加到已处理集合
+            self.request_set.add(unique_id)
+            
+            # 获取IP信息
+            ip_info = self._get_ip_info(ip) if ip != "Unknown" else {
+                'country': 'Unknown',
+                'region': 'Unknown',
+                'city': 'Unknown',
+                'isp': 'Unknown',
+                'org': 'Unknown'
+            }
+            
+            request_info = {
+                'type': 'WebSocket',
+                'subtype': payload.get('subtype', ''),
+                'domain': host,
+                'ip': ip,
+                'port': port,
+                'scheme': scheme,
+                'url': url,
+                'timestamp': payload.get('timestamp', datetime.now().isoformat()),
+                'country': ip_info.get('country', 'Unknown'),
+                'region': ip_info.get('region', 'Unknown'),
+                'city': ip_info.get('city', 'Unknown'),
+                'isp': ip_info.get('isp', 'Unknown'),
+                'org': ip_info.get('org', 'Unknown')
+            }
+            
+            # 添加到结果列表
+            if not hasattr(self, 'results') or self.results is None:
+                self.results = {'requests': []}
+            self.results['requests'].append(request_info)
+            
+            # 回调更新界面
+            if self.progress_callback:
+                self.progress_callback(request_info)
+            
+        except Exception as e:
+            print(f"处理WebSocket请求时出错: {str(e)}")
             print(f"Payload: {payload}")
 
     def _is_ip(self, addr):

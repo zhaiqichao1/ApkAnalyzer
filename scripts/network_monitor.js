@@ -26,83 +26,163 @@ Java.perform(function() {
     // 监控 WebView
     try {
         var WebView = Java.use('android.webkit.WebView');
+        var WebViewClient = Java.use('android.webkit.WebViewClient');
+        var WebResourceRequest = Java.use('android.webkit.WebResourceRequest');
+        var WebResourceResponse = Java.use('android.webkit.WebResourceResponse');
         
-        // 监控 loadUrl
+        // 监控所有 WebView loadUrl 方法
         WebView.loadUrl.overload('java.lang.String').implementation = function(url) {
             send({
                 type: 'webview',
+                subtype: 'loadUrl',
                 url: url,
-                method: 'loadUrl',
                 timestamp: new Date().toISOString()
             });
             return this.loadUrl(url);
         };
-        
-        // 监控 loadData
-        WebView.loadData.implementation = function(data, mimeType, encoding) {
+
+        WebView.loadUrl.overload('java.lang.String', 'java.util.Map').implementation = function(url, headers) {
             send({
                 type: 'webview',
-                data: data,
-                mimeType: mimeType,
-                encoding: encoding,
-                method: 'loadData',
-                timestamp: new Date().toISOString()
-            });
-            return this.loadData(data, mimeType, encoding);
-        };
-        
-        // 监控 loadDataWithBaseURL
-        WebView.loadDataWithBaseURL.implementation = function(baseUrl, data, mimeType, encoding, historyUrl) {
-            send({
-                type: 'webview',
-                baseUrl: baseUrl,
-                data: data,
-                mimeType: mimeType,
-                encoding: encoding,
-                historyUrl: historyUrl,
-                method: 'loadDataWithBaseURL',
-                timestamp: new Date().toISOString()
-            });
-            return this.loadDataWithBaseURL(baseUrl, data, mimeType, encoding, historyUrl);
-        };
-        
-        // 监控 postUrl
-        WebView.postUrl.implementation = function(url, postData) {
-            send({
-                type: 'webview',
+                subtype: 'loadUrlWithHeaders',
                 url: url,
-                postData: postData ? postData.toString() : null,
-                method: 'postUrl',
+                headers: JSON.stringify(headers),
                 timestamp: new Date().toISOString()
             });
-            return this.postUrl(url, postData);
+            return this.loadUrl(url, headers);
         };
-        
-        // 监控 WebViewClient
-        var WebViewClient = Java.use('android.webkit.WebViewClient');
-        
-        WebViewClient.onLoadResource.implementation = function(view, url) {
+
+        // 监控 WebViewClient 的所有网络相关方法
+        WebViewClient.$init.implementation = function() {
+            var client = this.$init();
+
+            // 重写 shouldInterceptRequest 方法
+            if (!this.shouldInterceptRequest.overload('android.webkit.WebView', 'android.webkit.WebResourceRequest').implementation) {
+                this.shouldInterceptRequest.overload('android.webkit.WebView', 'android.webkit.WebResourceRequest').implementation = function(view, request) {
+                    try {
+                        var url = request.getUrl().toString();
+                        var method = request.getMethod();
+                        var headers = request.getRequestHeaders();
+                        
+                        send({
+                            type: 'webview',
+                            subtype: 'shouldInterceptRequest',
+                            url: url,
+                            method: method,
+                            headers: JSON.stringify(headers),
+                            timestamp: new Date().toISOString()
+                        });
+                    } catch(e) {}
+                    return this.shouldInterceptRequest(view, request);
+                };
+            }
+
+            // 监控页面开始加载
+            if (!this.onPageStarted.implementation) {
+                this.onPageStarted.implementation = function(view, url, favicon) {
+                    send({
+                        type: 'webview',
+                        subtype: 'onPageStarted',
+                        url: url,
+                        timestamp: new Date().toISOString()
+                    });
+                    return this.onPageStarted(view, url, favicon);
+                };
+            }
+
+            // 监控资源加载
+            if (!this.onLoadResource.implementation) {
+                this.onLoadResource.implementation = function(view, url) {
+                    send({
+                        type: 'webview',
+                        subtype: 'onLoadResource',
+                        url: url,
+                        timestamp: new Date().toISOString()
+                    });
+                    return this.onLoadResource(view, url);
+                };
+            }
+
+            return client;
+        };
+
+        // 监控 WebChromeClient
+        try {
+            var WebChromeClient = Java.use('android.webkit.WebChromeClient');
+            WebChromeClient.$init.implementation = function() {
+                var client = this.$init();
+
+                // 监控 onConsoleMessage
+                if (!this.onConsoleMessage.implementation) {
+                    this.onConsoleMessage.implementation = function(consoleMessage) {
+                        try {
+                            var message = consoleMessage.message();
+                            if (message.indexOf('http') !== -1 || message.indexOf('https') !== -1) {
+                                send({
+                                    type: 'webview',
+                                    subtype: 'console',
+                                    url: message,
+                                    timestamp: new Date().toISOString()
+                                });
+                            }
+                        } catch(e) {}
+                        return this.onConsoleMessage(consoleMessage);
+                    };
+                }
+
+                return client;
+            };
+        } catch(e) {}
+
+        // 监控 WebSettings
+        var WebSettings = Java.use('android.webkit.WebSettings');
+        WebSettings.setJavaScriptEnabled.implementation = function(enabled) {
             send({
                 type: 'webview',
-                url: url.toString(),
-                method: 'onLoadResource',
+                subtype: 'settings',
+                action: 'setJavaScriptEnabled',
+                value: enabled,
                 timestamp: new Date().toISOString()
             });
-            return this.onLoadResource(view, url);
+            return this.setJavaScriptEnabled(enabled);
         };
-        
-        WebViewClient.shouldInterceptRequest.overload('android.webkit.WebView', 'java.lang.String').implementation = function(view, url) {
-            send({
-                type: 'webview',
-                url: url,
-                method: 'shouldInterceptRequest',
-                timestamp: new Date().toISOString()
-            });
-            return this.shouldInterceptRequest(view, url);
-        };
+
     } catch(e) {
         console.log("WebView hook error: " + e);
     }
+
+    // 监控 XMLHttpRequest
+    try {
+        var XMLHttpRequest = Java.use('org.chromium.android_webview.AwContents');
+        XMLHttpRequest.onRequest.implementation = function(request) {
+            try {
+                send({
+                    type: 'webview',
+                    subtype: 'xhr',
+                    url: request.url.toString(),
+                    method: request.method,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.onRequest(request);
+        };
+    } catch(e) {}
+
+    // 监控 Fetch API
+    try {
+        var fetch = Java.use('com.android.webview.chromium.WebViewChromium');
+        fetch.loadUrl.implementation = function(url) {
+            if (url.indexOf('fetch') !== -1) {
+                send({
+                    type: 'webview',
+                    subtype: 'fetch',
+                    url: url,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            return this.loadUrl(url);
+        };
+    } catch(e) {}
 
     // 添加 HttpURLConnection 监控
     var HttpURLConnection = Java.use("java.net.HttpURLConnection");
@@ -168,6 +248,117 @@ Java.perform(function() {
                 });
             } catch(e) {}
             return this.startHandshake();
+        };
+    } catch(e) {}
+
+    // 监控 WebSocket
+    try {
+        // 监控标准 WebSocket
+        var WebSocket = Java.use('java.net.WebSocket');
+        if (WebSocket) {
+            WebSocket.connect.implementation = function() {
+                try {
+                    var url = this.getURI().toString();
+                    send({
+                        type: 'websocket',
+                        subtype: 'connect',
+                        url: url,
+                        timestamp: new Date().toISOString()
+                    });
+                } catch(e) {}
+                return this.connect();
+            };
+        }
+    } catch(e) {}
+
+    // 监控 OkHttp WebSocket
+    try {
+        var OkHttpClient = Java.use('okhttp3.OkHttpClient');
+        var WebSocketListener = Java.use('okhttp3.WebSocketListener');
+        
+        OkHttpClient.newWebSocket.implementation = function(request, listener) {
+            try {
+                var url = request.url().toString();
+                send({
+                    type: 'websocket',
+                    subtype: 'okhttp',
+                    url: url,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.newWebSocket(request, listener);
+        };
+    } catch(e) {}
+
+    // 监控 Android WebSocket
+    try {
+        var WebSocketClient = Java.use('org.java_websocket.client.WebSocketClient');
+        WebSocketClient.connect.implementation = function() {
+            try {
+                var url = this.getURI().toString();
+                send({
+                    type: 'websocket',
+                    subtype: 'java_websocket',
+                    url: url,
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.connect();
+        };
+    } catch(e) {}
+
+    // 监控 WebView WebSocket
+    try {
+        var WebView = Java.use('android.webkit.WebView');
+        
+        // 监控 WebSocket JavaScript Bridge
+        WebView.evaluateJavascript.implementation = function(script, callback) {
+            try {
+                if (script.indexOf('WebSocket') !== -1) {
+                    var wsMatch = script.match(/WebSocket\(['"](.*?)['"]\)/);
+                    if (wsMatch) {
+                        send({
+                            type: 'websocket',
+                            subtype: 'webview_js',
+                            url: wsMatch[1],
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                }
+            } catch(e) {}
+            return this.evaluateJavascript(script, callback);
+        };
+    } catch(e) {}
+
+    // 监控 Jetty WebSocket
+    try {
+        var WebSocketClientFactory = Java.use('org.eclipse.jetty.websocket.client.WebSocketClient');
+        WebSocketClientFactory.connect.implementation = function(uri, handler) {
+            try {
+                send({
+                    type: 'websocket',
+                    subtype: 'jetty',
+                    url: uri.toString(),
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.connect(uri, handler);
+        };
+    } catch(e) {}
+
+    // 监控 Apache Tomcat WebSocket
+    try {
+        var WsWebSocketContainer = Java.use('org.apache.tomcat.websocket.WsWebSocketContainer');
+        WsWebSocketContainer.connectToServer.implementation = function(endpoint, path) {
+            try {
+                send({
+                    type: 'websocket',
+                    subtype: 'tomcat',
+                    url: path.toString(),
+                    timestamp: new Date().toISOString()
+                });
+            } catch(e) {}
+            return this.connectToServer(endpoint, path);
         };
     } catch(e) {}
 }); 
